@@ -12,7 +12,9 @@ from utils.extract_image import extract_text_from_image
 from utils.extract_code import extract_text_from_code
 
 # Set Gemini API key
-os.environ["GEMINI_API_KEY"] = ""
+with open("api.txt", "r") as f:
+    api_key = f.read().strip()
+os.environ["GEMINI_API_KEY"] = api_key
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
@@ -437,4 +439,4 @@ if 'description' in st.session_state and st.session_state['description']:
     # Show the last answer if it exists
     if st.session_state.get('last_answer'):
         st.subheader('Answer')
-        st.write(st.session_state['last_answer']) 
+        st.write(st.session_state['last_answer'])

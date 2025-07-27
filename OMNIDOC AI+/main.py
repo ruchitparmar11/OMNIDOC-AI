@@ -16,7 +16,9 @@ from fpdf import FPDF
 # from themes import themes  # Removed because themes.py has been deleted and is no longer used
 
 # Set Gemini API key
-os.environ["GEMINI_API_KEY"] = "AIzaSyC6zJJDT_Lbev8VpSrbYjPgmlMXIxVu174"
+with open("api.txt", "r") as f:
+    api_key = f.read().strip()
+os.environ["GEMINI_API_KEY"] = api_key
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 

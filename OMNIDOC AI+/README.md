@@ -1,77 +1,104 @@
-# GenAI Multimodal Description & Q&A
+# OMNIDOC AI+ Multimodal Assistant
 
-## Overview
-This project allows users to upload or input various file types (text, PDF, Word, images, code, video) and generates a detailed description using Gemini Flash 1.5 API. Users can then ask questions about the generated description for Q&A.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
-- Accepts text, PDF, Word (docx), image, code, and video files
-- Extracts content from each file type
-- Generates a detailed description using Gemini Flash 1.5
-- Q&A over the generated description
-- Simple web UI (Streamlit)
+## 🎯 Overview
+OMNIDOC AI+ is an intelligent document analysis tool that processes multiple file formats and enables natural language Q&A interactions using the Gemini 2.0 pro API. Upload any supported file and get detailed descriptions and insights through an intuitive interface.
 
-## Setup
-1. Clone the repository
+## ✨ Key Features
+- **Multiple Format Support**
+  - Text files (.txt)
+  - PDF documents
+  - Microsoft Word (.docx)
+  - Images (png, jpg, jpeg)
+  - Source code files
+  - Video files
+- **Smart Processing**
+  - Automatic content extraction
+  - AI-powered descriptions
+  - Interactive Q&A system
+- **User-Friendly Interface**
+  - Built with Streamlit
+  - Simple upload mechanism
+  - Real-time processing
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.8 or higher
+- Gemini API key
+- Git
+
+### Installation
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/ruchitparmar11/omnidoc-ai.git
+   cd omnidoc-ai+
+   ```
+
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. Set your Gemini API key as an environment variable:
+
+3. Configure API key:
    ```bash
+   # Windows
+   set GEMINI_API_KEY=your_api_key_here
+
+   # Linux/MacOS
    export GEMINI_API_KEY=your_api_key_here
    ```
-   (On Windows: `set GEMINI_API_KEY=your_api_key_here`)
 
-## Usage
-Run the app:
-```bash
-streamlit run main.py
-```
-
-Upload a file or enter text, get a description, and ask questions! 
-
-Your GenAI multimodal project is now scaffolded and ready! Here’s what’s included:
-
-### ✅ Features Implemented
-- **Handles all input types:** text, PDF, Word, image, code, video
-- **Extraction utilities** for each type in `utils/`
-- **Streamlit web app** (`main.py`) for upload, description generation, and Q&A
-- **Gemini Flash 1.5 API** integration
-- **Requirements and README** for setup
-
----
-
-## 🚀 Next Steps
-
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Set your Gemini API key:**
-   - On Windows:
-     ```
-     set GEMINI_API_KEY=your_api_key_here
-     ```
-   - On Mac/Linux:
-     ```
-     export GEMINI_API_KEY=your_api_key_here
-     ```
-
-3. **Run the app:**
+### Usage
+1. Start the application:
    ```bash
    streamlit run main.py
    ```
+2. Open your browser at `http://localhost:8501`
+3. Upload a file or paste content
+4. Get AI-generated descriptions
+5. Ask questions about the content
 
-4. **Upload a file or enter text/code, generate a description, and ask questions!**
+## 🛠️ Technical Architecture
+- **Frontend**: Streamlit
+- **AI Engine**: Gemini 2.0 pro
+- **Content Processing**: Custom utilities for each file type
+- **Audio/Video**: Whisper model integration
 
----
+## 📝 API Reference
+```python
+from omnidoc import process_file
 
-## ⚠️ Notes
-- For video/audio transcription, the first run of Whisper will download the model (may take time).
-- If you want to support more code file types, just add their extensions in `main.py`.
-- You can further improve the UI or add error handling as needed.
+# Basic usage
+result = process_file(file_path)
+description = result.get_description()
+```
 
----
+## 🤝 Contributing
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-Would you like any additional features, improvements, or help with deployment? 
+## ⚠️ Known Limitations
+- Video processing requires initial model download
+- Large files (>100MB) may take longer to process
+- API rate limits apply based on your Gemini API tier
+
+## 📄 License
+Distributed under the MIT License. See `LICENSE` for more information.
+
+## 📞 Support
+- Create an issue for bug reports
+- Join our [Discord community](https://discord.gg/yourdiscord)
+- Email: support@yourdomain.com
+
+## 🙏 Acknowledgments
+- Gemini 2.0 pro
+- Streamlit framework
+- OpenAI Whisper
+- All contributors
+
+> _If you know, you know. OMNIDOC AI+ is built for developers who need fast, intelligent document analysis and Q&A—by devs, for devs._

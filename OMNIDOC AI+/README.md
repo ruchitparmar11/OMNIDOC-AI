@@ -92,8 +92,8 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 ## 📞 Support
 - Create an issue for bug reports
-- Join our [Discord community](https://discord.gg/yourdiscord)
-- Email: support@yourdomain.com
+- Join our [Linkedin](www.linkedin.com/in/ruchit-parmar-16562229b)
+- Email: ruchitparmar78@gmail.com
 
 ## 🙏 Acknowledgments
 - Gemini 2.0 pro

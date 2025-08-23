@@ -665,12 +665,22 @@ if st.button('Generate Description'):
                         "Focus on the main points and keep it brief. "
                         "Content:\n\n" + content
                     )
+                    # Generate and display the description immediately
+                    description = generate_with_retry(detailed_prompt)
+                    st.markdown("### Generated Summary")
+                    st.write(description)
+
                 elif output_type == "Bullet Points":
                     detailed_prompt = (
                         "Read the following content and generate a list of key points in bullet format. "
                         "Each bullet should be a distinct, important idea. "
                         "Content:\n\n" + content
                     )
+                    # Generate and display the description immediately
+                    description = generate_with_retry(detailed_prompt)
+                    st.markdown("### Generated Bullet Points")
+                    st.write(description)
+
                 elif output_type == "Q&A":
                     # Enhanced question extraction to capture ALL question formats
                     extract_questions_prompt = (
@@ -778,12 +788,14 @@ if st.button('Generate Description'):
                         "Content:\n\n" + content
                     )
                     description = generate_with_retry(detailed_prompt)
+                
+                # After generating the description, store it in session state
                 st.session_state['description'] = description
                 st.session_state['last_answer'] = ''
                 st.session_state['current_content'] = content
                 st.session_state['current_content_type'] = content_type
-                
-                # Save description to history immediately
+
+                # Save to history
                 save_user_history(
                     st.session_state.user_id,
                     content_type,
@@ -791,7 +803,7 @@ if st.button('Generate Description'):
                     description,
                     "",  # No questions yet
                     "",  # No answers yet
-                    file_name  # This should be "Deloitte Data Analysis.pdf"
+                    file_name
                 )
                 st.rerun()  # Refresh to show in history immediately
             except Exception as e:
@@ -893,4 +905,4 @@ if 'description' in st.session_state and st.session_state['description']:
     # Show the last answer if it exists
     if st.session_state.get('last_answer'):
         st.subheader('Answer')
-        st.write(st.session_state['last_answer'])        
+        st.write(st.session_state['last_answer'])

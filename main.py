@@ -42,6 +42,14 @@ def init_db():
                   answers TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (id))''')
+    
+    # Add file_name column if it doesn't exist
+    try:
+        c.execute("ALTER TABLE user_history ADD COLUMN file_name TEXT")
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
+    
     conn.commit()
     conn.close()
 
@@ -70,20 +78,20 @@ def login_user(username, password):
     conn.close()
     return user
 
-def save_user_history(user_id, content_type, content, description, questions="", answers=""):
+def save_user_history(user_id, content_type, content, description, questions="", answers="", file_name=None):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("""INSERT INTO user_history 
-                 (user_id, content_type, content, description, questions, answers) 
-                 VALUES (?, ?, ?, ?, ?, ?)""", 
-              (user_id, content_type, content, description, questions, answers))
+                 (user_id, content_type, content, description, questions, answers, file_name) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)""", 
+              (user_id, content_type, content, description, questions, answers, file_name))
     conn.commit()
     conn.close()
 
 def get_user_history(user_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("""SELECT content_type, content, description, questions, answers, created_at, id 
+    c.execute("""SELECT content_type, content, description, questions, answers, created_at, id, file_name 
                  FROM user_history WHERE user_id = ? ORDER BY created_at DESC""", (user_id,))
     history = c.fetchall()
     conn.close()
@@ -94,6 +102,14 @@ def delete_user_history_entry(entry_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("DELETE FROM user_history WHERE id = ?", (entry_id,))
+    conn.commit()
+    conn.close()
+
+# New: Update filename for a history entry
+def update_history_filename(entry_id, new_filename):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE user_history SET file_name = ? WHERE id = ?", (new_filename, entry_id))
     conn.commit()
     conn.close()
 
@@ -386,7 +402,7 @@ st.write("Upload a file (text, PDF, Word, image, code) or enter text. Get a deta
 # Output type selection
 output_type = st.radio(
     "Select output type:",
-    ("Summary", "Detailed", "Bullet Points"),
+    ("Summary", "Detailed", "Bullet Points", "Q&A"),
     horizontal=True
 )
 
@@ -421,7 +437,13 @@ if st.sidebar.button("🚪 Logout", use_container_width=True):
 st.sidebar.header("Your History")
 
 def safe_text(text):
-    return text.encode('latin1', 'ignore').decode('latin1')
+    if not text:
+        return ""
+    # Remove problematic characters and ensure ASCII compatibility
+    safe_str = str(text).encode('ascii', 'ignore').decode('ascii')
+    # Replace any remaining problematic characters
+    safe_str = ''.join(char if ord(char) < 128 else '?' for char in safe_str)
+    return safe_str
 
 user_history = get_user_history(st.session_state.user_id)
 if user_history:
@@ -430,23 +452,41 @@ if user_history:
     def history_to_pdf(history):
         pdf = FPDF()
         pdf.add_page()
-        pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt="User History", ln=True, align="C")
+        pdf.set_font("Arial", size=10)
+        pdf.cell(0, 10, txt="User History", ln=True, align="C")
         pdf.ln(5)
+        
         for idx, row in enumerate(history, 1):
-            content_type, content, description, questions, answers, created_at, entry_id = row
-            pdf.set_font("Arial", style="B", size=11)
-            pdf.cell(0, 8, safe_text(f"Entry {idx} - {content_type} - {created_at}"), ln=True)
-            pdf.set_font("Arial", size=10)
-            pdf.multi_cell(0, 6, safe_text(f"Description: {description}"))
-            pdf.multi_cell(0, 6, safe_text(f"Content: {content[:200]}{'...' if len(content) > 200 else ''}"))
-            if questions:
-                pdf.multi_cell(0, 6, safe_text(f"Questions: {questions}"))
-            if answers:
-                pdf.multi_cell(0, 6, safe_text(f"Answers: {answers}"))
-            pdf.ln(4)
-        pdf_output = pdf.output(dest='S').encode('utf-8')
-        return pdf_output
+            content_type, content, description, questions, answers, created_at, entry_id, file_name = row
+            
+            try:
+                pdf.set_font("Arial", style="B", size=9)
+                display_name = file_name if file_name else f"{content_type} - {created_at[:10] if created_at else 'N/A'}"
+                pdf.cell(0, 6, safe_text(f"Entry {idx} - {display_name}"), ln=True)
+                pdf.set_font("Arial", size=8)
+                
+                # Truncate and clean text more aggressively
+                desc_text = safe_text(description[:100] if description else "No description")
+                content_text = safe_text(content[:100] if content else "No content")
+                
+                pdf.multi_cell(0, 4, f"Description: {desc_text}...")
+                pdf.multi_cell(0, 4, f"Content: {content_text}...")
+                
+                if questions:
+                    q_text = safe_text(questions[:80] if questions else "")
+                    pdf.multi_cell(0, 4, f"Questions: {q_text}...")
+                if answers:
+                    a_text = safe_text(answers[:80] if answers else "")
+                    pdf.multi_cell(0, 4, f"Answers: {a_text}...")
+                pdf.ln(2)
+                
+            except Exception as e:
+                # Skip problematic entries
+                pdf.cell(0, 6, f"Entry {idx}: Error processing entry", ln=True)
+                continue
+        
+        pdf_output = pdf.output(dest='S')
+        return bytes(pdf_output)
     pdf_data = history_to_pdf(user_history)
     st.sidebar.download_button(
         label="⬇️ Download History (PDF)",
@@ -478,28 +518,49 @@ if user_history:
     selected_ids = set(st.session_state.get('selected_history_ids', set()))
 
     # Show checkboxes and entries (filtered)
-    for i, (content_type, content, description, questions, answers, created_at, entry_id) in enumerate(filtered_history):
-        with st.sidebar.expander(f"\U0001F4C4 {content_type} - {created_at[:10]}", expanded=False):
+    for i, (content_type, content, description, questions, answers, created_at, entry_id, file_name) in enumerate(filtered_history):
+        display_name = file_name if file_name else f"{content_type} - {created_at[:10]}"
+        with st.sidebar.expander(f"📄 {display_name}", expanded=False):
             checked = st.checkbox("Select", key=f"select_{entry_id}", value=entry_id in selected_ids)
             if checked:
                 selected_ids.add(entry_id)
             else:
                 selected_ids.discard(entry_id)
             st.session_state['selected_history_ids'] = selected_ids
+            
+            # File name editing
+            if st.session_state.get(f'edit_name_{entry_id}', False):
+                new_name = st.text_input("Edit name:", value=file_name or display_name, key=f"name_input_{entry_id}")
+                col_save, col_cancel = st.columns(2)
+                with col_save:
+                    if st.button("💾 Save", key=f"save_name_{entry_id}"):
+                        update_history_filename(entry_id, new_name)
+                        st.session_state[f'edit_name_{entry_id}'] = False
+                        st.success("Name updated!")
+                        st.rerun()
+                with col_cancel:
+                    if st.button("❌ Cancel", key=f"cancel_name_{entry_id}"):
+                        st.session_state[f'edit_name_{entry_id}'] = False
+                        st.rerun()
+            else:
+                if st.button("✏️ Edit Name", key=f"edit_btn_{entry_id}"):
+                    st.session_state[f'edit_name_{entry_id}'] = True
+                    st.rerun()
+            
             st.write(f"**Content:** {content[:80]}...")
             st.write(f"**Description:** {description[:80]}...")
             if questions:
                 st.write(f"**Questions:** {questions[:50]}...")
             col1, col2 = st.columns([2, 1])
             with col1:
-                if st.button(f"\U0001F501 Load Session {i+1}", key=f"load_{entry_id}"):
+                if st.button(f"🔄 Load Session {i+1}", key=f"load_{entry_id}"):
                     st.session_state['description'] = description
                     st.session_state['last_answer'] = answers if answers else ""
                     st.session_state['current_questions'] = questions
                     st.session_state['current_answers'] = answers
                     st.rerun()
             with col2:
-                if st.button(f"\U0001F5D1\ufe0f Delete", key=f"delete_{entry_id}"):
+                if st.button(f"🗑️ Delete", key=f"delete_{entry_id}"):
                     st.session_state['confirm_delete_id'] = entry_id
                     st.session_state['show_confirm_delete'] = True
                     st.rerun()
@@ -566,8 +627,10 @@ description = ''
 if st.button('Generate Description'):
     content = ''
     content_type = 'text'
+    file_name = None  # Add this to track file name
     
     if uploaded_file:
+        file_name = uploaded_file.name  # Get the actual file name
         suffix = os.path.splitext(uploaded_file.name)[1].lower()
         content_type = f"file ({suffix})"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -608,13 +671,113 @@ if st.button('Generate Description'):
                         "Each bullet should be a distinct, important idea. "
                         "Content:\n\n" + content
                     )
+                elif output_type == "Q&A":
+                    # Enhanced question extraction to capture ALL question formats
+                    extract_questions_prompt = (
+                        "Carefully analyze the following content and extract ALL questions, regardless of format. "
+                        "Look for:\n"
+                        "- Questions ending with '?' (What is this?)\n"
+                        "- Questions starting with question words without '?' (What is the main idea)\n"
+                        "- Numbered questions (1. Define photosynthesis, 2. Explain the process)\n"
+                        "- Imperative questions (Explain, Define, Describe, List, Compare, etc.)\n"
+                        "- Fill-in-the-blank questions (Complete the sentence, Fill in the blanks)\n"
+                        "- True/False questions\n"
+                        "- Multiple choice questions\n"
+                        "- Any sentence that asks for information, explanation, or response\n\n"
+                        "Extract EVERY question you find, even if it doesn't end with '?'. "
+                        "List each question on a separate line with clear numbering (1., 2., 3., etc.). "
+                        "Be extremely thorough - don't miss any questions regardless of their format. "
+                        "If absolutely no questions are found, respond with 'No questions found'.\n\n"
+                        "Content:\n\n" + content
+                    )
+                    
+                    with st.spinner('Extracting ALL questions (including those without ?)...'):
+                        questions_text = generate_with_retry(extract_questions_prompt)
+                        st.session_state['extracted_questions'] = questions_text
+                    
+                    # More comprehensive question parsing
+                    if "No questions found" not in questions_text.lower():
+                        # Split by lines and filter with expanded criteria
+                        lines = questions_text.split('\n')
+                        questions_list = []
+                        
+                        for line in lines:
+                            line = line.strip()
+                            if line and (
+                                # Numbered questions (1., 2., Q1, etc.)
+                                any(char.isdigit() for char in line[:10]) or
+                                # Questions ending with ?
+                                line.endswith('?') or
+                                # Question word starters
+                                any(line.lower().startswith(word) for word in [
+                                    'what', 'how', 'why', 'when', 'where', 'who', 'which', 'whose',
+                                    'can', 'will', 'would', 'could', 'should', 'may', 'might',
+                                    'is', 'are', 'was', 'were', 'do', 'does', 'did', 'have', 'has', 'had'
+                                ]) or
+                                # Imperative question words
+                                any(line.lower().startswith(word) for word in [
+                                    'explain', 'describe', 'define', 'list', 'compare', 'contrast',
+                                    'analyze', 'evaluate', 'discuss', 'identify', 'name', 'state',
+                                    'give', 'provide', 'show', 'prove', 'calculate', 'solve',
+                                    'find', 'determine', 'complete', 'fill', 'choose', 'select'
+                                ]) or
+                                # Contains question indicators
+                                any(phrase in line.lower() for phrase in [
+                                    'true or false', 'multiple choice', 'fill in', 'complete the',
+                                    'choose the', 'select the', 'which of the following'
+                                ])
+                            ):
+                                questions_list.append(line)
+                        
+                        if questions_list:
+                            st.write(f"Found {len(questions_list)} questions. Generating detailed answers...")
+                            
+                            all_qa_pairs = []
+                            progress_bar = st.progress(0)
+                            
+                            for i, question in enumerate(questions_list):
+                                # Clean the question (remove numbering if present)
+                                clean_question = question
+                                # Remove various numbering formats
+                                import re
+                                clean_question = re.sub(r'^[\d]+[\.\)\:]?\s*', '', clean_question)
+                                clean_question = re.sub(r'^[Qq][\d]+[\.\)\:]?\s*', '', clean_question)
+                                clean_question = clean_question.strip()
+                                
+                                with st.spinner(f'Generating detailed answer for question {i+1}/{len(questions_list)}...'):
+                                    answer_prompt = (
+                                        f"Based on the following content, provide a comprehensive, detailed, and thorough answer to this question: {clean_question}\n\n"
+                                        f"Content:\n{content}\n\n"
+                                        f"Question: {clean_question}\n\n"
+                                        "Instructions for your answer:\n"
+                                        "- Provide a detailed, comprehensive response\n"
+                                        "- Include relevant context and background information\n"
+                                        "- Use specific examples or details from the content when possible\n"
+                                        "- Make the answer informative and complete\n"
+                                        "- If the content doesn't fully answer the question, explain what information is available\n"
+                                        "- For imperative questions (Explain, Define, etc.), provide thorough explanations"
+                                    )
+                                    
+                                    try:
+                                        answer = generate_with_retry(answer_prompt)
+                                        all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\n{answer}\n\n---\n")
+                                    except Exception as e:
+                                        all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\nError generating answer: {str(e)}\n\n---\n")
+                                
+                                progress_bar.progress((i + 1) / len(questions_list))
+                            
+                            description = f"**Extracted Questions and Detailed Answers:**\n\n" + "\n".join(all_qa_pairs)
+                        else:
+                            description = "No valid questions could be extracted from the content."
+                    else:
+                        description = "No questions were found in the provided content."
                 else:  # Detailed
                     detailed_prompt = (
                         "Read the following content and generate a detailed, comprehensive description. "
                         "Include all important points, context, and nuances. "
                         "Content:\n\n" + content
                     )
-                description = generate_with_retry(detailed_prompt)
+                    description = generate_with_retry(detailed_prompt)
                 st.session_state['description'] = description
                 st.session_state['last_answer'] = ''
                 st.session_state['current_content'] = content
@@ -627,8 +790,10 @@ if st.button('Generate Description'):
                     content,
                     description,
                     "",  # No questions yet
-                    ""   # No answers yet
+                    "",  # No answers yet
+                    file_name  # This should be "Deloitte Data Analysis.pdf"
                 )
+                st.rerun()  # Refresh to show in history immediately
             except Exception as e:
                 error_msg = str(e)
                 if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
@@ -728,4 +893,4 @@ if 'description' in st.session_state and st.session_state['description']:
     # Show the last answer if it exists
     if st.session_state.get('last_answer'):
         st.subheader('Answer')
-        st.write(st.session_state['last_answer'])
+        st.write(st.session_state['last_answer'])        

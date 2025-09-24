@@ -16,11 +16,25 @@ from fpdf import FPDF
 # from themes import themes  # Removed because themes.py has been deleted and is no longer used
 
 # Set Gemini API key
-with open("api.txt", "r") as f:
-    api_key = f.read().strip()
-os.environ["GEMINI_API_KEY"] = api_key
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    # Fallback for local development
+    if os.path.exists("api.txt"):
+        with open("api.txt", "r") as f:
+            api_key = f.read().strip()
+    else:
+        raise RuntimeError("No API key found. Please set GEMINI_API_KEY in secrets or create api.txt.")
+
+genai.configure(api_key=api_key)
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+# with open("api.txt", "r") as f:
+#     api_key = f.read().strip()
+# os.environ["GEMINI_API_KEY"] = api_key
+# genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+# model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Database setup
 def init_db():

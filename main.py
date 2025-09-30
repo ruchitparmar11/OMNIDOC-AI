@@ -398,7 +398,7 @@ st.markdown('''
 # Main application (user is logged in)
 # Add this text before the welcome header
 st.markdown("""
-<h1 style='font-size:2.2rem; font-weight:800; color:#CFE7E0; margin-bottom:0.5em;'>
+<h1 style='font-size:2.2rem; font-weight:800; color:#CFE7E0; margin-bottom:0.5em; text-align: center'>
     OMNIDOC AI Multimodal Description &amp; Q&amp;A
 </h1>
 """, unsafe_allow_html=True)

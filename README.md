@@ -12,7 +12,7 @@ OMNIDOC AI+ is an intelligent document analysis tool that processes multiple fil
   - Microsoft Word (.docx)
   - Images (png, jpg, jpeg)
   - Source code files
-  - Video files
+  
 - **Smart Processing**
   - Automatic content extraction
   - AI-powered descriptions

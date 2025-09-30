@@ -19,16 +19,28 @@ from fpdf import FPDF
 
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    # Fallback for local development
-    if os.path.exists("api.txt"):
-        with open("api.txt", "r") as f:
-            api_key = f.read().strip()
-    else:
-        raise RuntimeError("No API key found. Please set GEMINI_API_KEY in secrets or create api.txt.")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+except KeyError:
+    st.error("❌ GEMINI_API_KEY not found in secrets. Please configure it in your Streamlit secrets.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Error configuring Gemini API: {str(e)}")
+    st.stop()
 
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+# try:
+#     api_key = st.secrets["GEMINI_API_KEY"]
+# except Exception:
+#     # Fallback for local development
+#     if os.path.exists("api.txt"):
+#         with open("api.txt", "r") as f:
+#             api_key = f.read().strip()
+#     else:
+#         raise RuntimeError("No API key found. Please set GEMINI_API_KEY in secrets or create api.txt.")
+
+# genai.configure(api_key=api_key)
+# model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # with open("api.txt", "r") as f:
 #     api_key = f.read().strip()

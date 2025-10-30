@@ -15,6 +15,16 @@ from utils.extract_code import extract_text_from_code
 from fpdf import FPDF
 # from themes import themes  # Removed because themes.py has been deleted and is no longer used
 
+import pytesseract
+import platform
+
+# Automatically pick correct Tesseract path
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+else:
+    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+
 # Set Gemini API key
 
 try:

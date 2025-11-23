@@ -30,7 +30,7 @@ else:
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    model = genai.GenerativeModel('gemini-2.0-flash')
 except KeyError:
     st.error("❌ GEMINI_API_KEY not found in secrets. Please configure it in your Streamlit secrets.")
     st.stop()

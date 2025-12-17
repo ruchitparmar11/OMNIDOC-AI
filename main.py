@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import tempfile
-import google.generativeai as genai
+from openai import OpenAI
 import sqlite3
 import hashlib
 import datetime
@@ -25,17 +25,58 @@ else:
     pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 
-# Set Gemini API key
+# Set OpenRouter API key
 
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # Try getting the key, handle both standard naming conventions
+    api_key = st.secrets.get("OPENROUTER_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+    
+    if not api_key:
+        raise KeyError("No OPENROUTER_API_KEY or OPENAI_API_KEY found in secrets.")
+
+    # Manually create httpx client to avoid proxy issues
+    import httpx
+    http_client = httpx.Client()
+    
+    # Configure OpenAI client for OpenRouter
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        http_client=http_client,
+        default_headers={
+            "HTTP-Referer": "http://localhost:8501", # Optional, for including your app on openrouter.ai rankings.
+            "X-Title": "OmniDoc AI", # Optional. Shows in rankings on openrouter.ai.
+        }
+    )
+    
+    # Define available OpenRouter models
+    all_models = [
+        'google/gemini-2.0-flash-exp:free',
+        'google/gemini-2.0-flash-lite-preview-02-05:free',
+        'google/gemini-exp-1206:free',
+        'google/gemini-pro-1.5'
+    ]
+
+    # Prioritized list to just one reliable model (user request)
+    preferences = [
+        'google/gemini-2.0-flash-exp:free'
+    ]
+
+    chosen_model = preferences[0]
+    
+    # Display available models for debugging (User can see this)
+    with st.sidebar.expander("🛠️ Model Debug Info"):
+        st.write(f"**Selected Model:** `{chosen_model}`")
+        st.write("**Using OpenRouter API**")
+        st.write("**Available Models:**")
+        for m in all_models:
+            st.write(f"- `{m}`")
+
 except KeyError:
-    st.error("❌ GEMINI_API_KEY not found in secrets. Please configure it in your Streamlit secrets.")
+    st.error("❌ API Key not found. Please set `OPENROUTER_API_KEY` in your `.streamlit/secrets.toml`.")
     st.stop()
 except Exception as e:
-    st.error(f"❌ Error configuring Gemini API: {str(e)}")
+    st.error(f"❌ Error configuring OpenRouter API: {str(e)}")
     st.stop()
 
 
@@ -67,7 +108,7 @@ def init_db():
                   username TEXT UNIQUE NOT NULL,
                   password_hash TEXT NOT NULL,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS user_history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
@@ -85,7 +126,7 @@ def init_db():
     except sqlite3.OperationalError:
         # Column already exists
         pass
-    
+
     conn.commit()
     conn.close()
 
@@ -152,21 +193,57 @@ def update_history_filename(entry_id, new_filename):
 # Initialize database
 init_db()
 
-# Retry function for Gemini API
-def generate_with_retry(prompt, max_retries=3, delay=2):
+# Retry function for OpenRouter API
+import re
+
+def generate_with_retry(prompt, max_retries=3, delay=1):
+    global chosen_model, client
+    
+    # Fallback list for OpenRouter free models
+    fallbacks = [
+        'google/gemini-2.0-flash-exp:free',
+        'google/gemini-2.0-flash-lite-preview-02-05:free',
+        'google/gemini-exp-1206:free'
+    ]
+    
+    current_attempt_model = chosen_model
+
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(prompt)
-            return response.text
+            response = client.chat.completions.create(
+                model=current_attempt_model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return response.choices[0].message.content
         except Exception as e:
             error_msg = str(e)
-            if attempt < max_retries - 1:  # Not the last attempt
-                if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
-                    st.warning(f"🔄 Attempt {attempt + 1} failed. Retrying in {delay} seconds...")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
-                    continue
-            # If it's the last attempt or a different error, raise the exception
+            
+            # rate limit / quota OR model not found (404)
+            if "429" in error_msg or "quota" in error_msg.lower() or "404" in error_msg or "not found" in error_msg.lower():
+                st.warning(f"⚠️ Issue with `{current_attempt_model}`. Switching models...")
+                
+                # Check next fallback
+                found_new = False
+                for fb in fallbacks:
+                    if fb != current_attempt_model:
+                        current_attempt_model = fb
+                        found_new = True
+                        st.info(f"🔄 Switching to fallback: `{fb}`")
+                        break
+                
+                if not found_new:
+                     st.error("⏳ All models exhausted or busy. Please wait.")
+                     time.sleep(5)
+                
+                continue
+            
+            elif "overloaded" in error_msg or "timeout" in error_msg:
+                 time.sleep(delay * (attempt + 1))
+                 continue
+
             raise e
 
 def generate_fallback_description(content, content_type):
@@ -491,23 +568,23 @@ if user_history:
         pdf.set_font("Arial", size=10)
         pdf.cell(0, 10, txt="User History", ln=True, align="C")
         pdf.ln(5)
-        
+
         for idx, row in enumerate(history, 1):
             content_type, content, description, questions, answers, created_at, entry_id, file_name = row
-            
+
             try:
                 pdf.set_font("Arial", style="B", size=9)
                 display_name = file_name if file_name else f"{content_type} - {created_at[:10] if created_at else 'N/A'}"
                 pdf.cell(0, 6, safe_text(f"Entry {idx} - {display_name}"), ln=True)
                 pdf.set_font("Arial", size=8)
-                
+
                 # Truncate and clean text more aggressively
                 desc_text = safe_text(description[:100] if description else "No description")
                 content_text = safe_text(content[:100] if content else "No content")
-                
+
                 pdf.multi_cell(0, 4, f"Description: {desc_text}...")
                 pdf.multi_cell(0, 4, f"Content: {content_text}...")
-                
+
                 if questions:
                     q_text = safe_text(questions[:80] if questions else "")
                     pdf.multi_cell(0, 4, f"Questions: {q_text}...")
@@ -515,12 +592,12 @@ if user_history:
                     a_text = safe_text(answers[:80] if answers else "")
                     pdf.multi_cell(0, 4, f"Answers: {a_text}...")
                 pdf.ln(2)
-                
+
             except Exception as e:
                 # Skip problematic entries
                 pdf.cell(0, 6, f"Entry {idx}: Error processing entry", ln=True)
                 continue
-        
+
         pdf_output = pdf.output(dest='S')
         return bytes(pdf_output)
     pdf_data = history_to_pdf(user_history)
@@ -532,7 +609,7 @@ if user_history:
     )
     # Search/filter input
     search_term = st.sidebar.text_input('🔍 Search history...', key='history_search')
-    
+
     # Filter history based on search term
     def matches_search(entry, term):
         content_type, content, description, questions, answers, created_at, entry_id = entry
@@ -545,7 +622,7 @@ if user_history:
             term in (answers or '').lower() or
             term in (created_at or '').lower()
         )
-    
+
     filtered_history = [entry for entry in user_history if matches_search(entry, search_term)] if search_term else user_history
 
     # Bulk delete: checkboxes for each entry
@@ -563,7 +640,7 @@ if user_history:
             else:
                 selected_ids.discard(entry_id)
             st.session_state['selected_history_ids'] = selected_ids
-            
+
             # File name editing
             if st.session_state.get(f'edit_name_{entry_id}', False):
                 new_name = st.text_input("Edit name:", value=file_name or display_name, key=f"name_input_{entry_id}")
@@ -582,7 +659,7 @@ if user_history:
                 if st.button("✏️ Edit Name", key=f"edit_btn_{entry_id}"):
                     st.session_state[f'edit_name_{entry_id}'] = True
                     st.rerun()
-            
+
             st.write(f"**Content:** {content[:80]}...")
             st.write(f"**Description:** {description[:80]}...")
             if questions:
@@ -664,7 +741,7 @@ if st.button('Generate Description'):
     content = ''
     content_type = 'text'
     file_name = None  # Add this to track file name
-    
+
     if uploaded_file:
         file_name = uploaded_file.name  # Get the actual file name
         suffix = os.path.splitext(uploaded_file.name)[1].lower()
@@ -691,7 +768,7 @@ if st.button('Generate Description'):
         content_type = 'text input'
     else:
         st.warning('Please upload a file or enter text.')
-    
+
     if content:
         with st.spinner('Generating description...'):
             try:
@@ -736,17 +813,17 @@ if st.button('Generate Description'):
                         "If absolutely no questions are found, respond with 'No questions found'.\n\n"
                         "Content:\n\n" + content
                     )
-                    
+
                     with st.spinner('Extracting ALL questions (including those without ?)...'):
                         questions_text = generate_with_retry(extract_questions_prompt)
                         st.session_state['extracted_questions'] = questions_text
-                    
+
                     # More comprehensive question parsing
                     if "No questions found" not in questions_text.lower():
                         # Split by lines and filter with expanded criteria
                         lines = questions_text.split('\n')
                         questions_list = []
-                        
+
                         for line in lines:
                             line = line.strip()
                             if line and (
@@ -774,13 +851,13 @@ if st.button('Generate Description'):
                                 ])
                             ):
                                 questions_list.append(line)
-                        
+
                         if questions_list:
                             st.write(f"Found {len(questions_list)} questions. Generating detailed answers...")
-                            
+
                             all_qa_pairs = []
                             progress_bar = st.progress(0)
-                            
+
                             for i, question in enumerate(questions_list):
                                 # Clean the question (remove numbering if present)
                                 clean_question = question
@@ -789,7 +866,7 @@ if st.button('Generate Description'):
                                 clean_question = re.sub(r'^[\d]+[\.\)\:]?\s*', '', clean_question)
                                 clean_question = re.sub(r'^[Qq][\d]+[\.\)\:]?\s*', '', clean_question)
                                 clean_question = clean_question.strip()
-                                
+
                                 with st.spinner(f'Generating detailed answer for question {i+1}/{len(questions_list)}...'):
                                     answer_prompt = (
                                         f"Based on the following content, provide a comprehensive, detailed, and thorough answer to this question: {clean_question}\n\n"
@@ -803,15 +880,15 @@ if st.button('Generate Description'):
                                         "- If the content doesn't fully answer the question, explain what information is available\n"
                                         "- For imperative questions (Explain, Define, etc.), provide thorough explanations"
                                     )
-                                    
+
                                     try:
                                         answer = generate_with_retry(answer_prompt)
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\n{answer}\n\n---\n")
                                     except Exception as e:
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\nError generating answer: {str(e)}\n\n---\n")
-                                
+
                                 progress_bar.progress((i + 1) / len(questions_list))
-                            
+
                             description = f"**Extracted Questions and Detailed Answers:**\n\n" + "\n".join(all_qa_pairs)
                         else:
                             description = "No valid questions could be extracted from the content."
@@ -824,13 +901,16 @@ if st.button('Generate Description'):
                         "Content:\n\n" + content
                     )
                     description = generate_with_retry(detailed_prompt)
-                
+
                 # After generating the description, store it in session state
                 st.session_state['description'] = description
                 st.session_state['last_answer'] = ''
                 st.session_state['current_content'] = content
                 st.session_state['current_content_type'] = content_type
 
+                if not description:
+                    description = "No description generated." 
+                
                 # Save to history
                 save_user_history(
                     st.session_state.user_id,
@@ -847,14 +927,14 @@ if st.button('Generate Description'):
                 if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
                     st.warning("🚫 Gemini API is currently overloaded. Using fallback description.")
                     st.info("💡 You can still use the app with basic descriptions while we wait for the API to recover.")
-                    
+
                     # Generate fallback description
                     description = generate_fallback_description(content, content_type)
                     st.session_state['description'] = description
                     st.session_state['last_answer'] = ''
                     st.session_state['current_content'] = content
                     st.session_state['current_content_type'] = content_type
-                    
+    
                     # Save fallback description to history
                     save_user_history(
                         st.session_state.user_id,
@@ -873,28 +953,28 @@ if 'description' in st.session_state and st.session_state['description']:
     st.write(st.session_state['description'])
     st.subheader('Ask a Question')
     question = st.text_input('Your question')
-    
+
     if st.button('Get Answer') and question.strip():
         prompt = f"Context: {st.session_state['description']}\n\nQuestion: {question}"
         with st.spinner('Getting answer...'):
             try:
                 st.session_state['last_answer'] = generate_with_retry(prompt)
-                
+
                 # Save to history
                 if 'current_content' in st.session_state:
                     current_questions = st.session_state.get('current_questions', '')
                     current_answers = st.session_state.get('current_answers', '')
-                    
+
                     if current_questions:
                         current_questions += f"\n---\n{question}"
                         current_answers += f"\n---\n{st.session_state['last_answer']}"
                     else:
                         current_questions = question
                         current_answers = st.session_state['last_answer']
-                    
+
                     st.session_state['current_questions'] = current_questions
                     st.session_state['current_answers'] = current_answers
-                    
+
                     # Save to database
                     save_user_history(
                         st.session_state.user_id,
@@ -910,22 +990,22 @@ if 'description' in st.session_state and st.session_state['description']:
                     st.warning("🚫 Gemini API is currently overloaded. Using fallback response.")
                     fallback_answer = f"Based on the content, I can see this is about: {st.session_state['description'][:100]}... However, I cannot provide a detailed answer right now due to API overload. Please try again later for a more comprehensive response."
                     st.session_state['last_answer'] = fallback_answer
-                    
+
                     # Save fallback answer to history
                     if 'current_content' in st.session_state:
                         current_questions = st.session_state.get('current_questions', '')
                         current_answers = st.session_state.get('current_answers', '')
-                        
+
                         if current_questions:
                             current_questions += f"\n---\n{question}"
                             current_answers += f"\n---\n{fallback_answer}"
                         else:
                             current_questions = question
                             current_answers = fallback_answer
-                        
+
                         st.session_state['current_questions'] = current_questions
                         st.session_state['current_answers'] = current_answers
-                        
+
                         # Save to database
                         save_user_history(
                             st.session_state.user_id,
@@ -937,7 +1017,7 @@ if 'description' in st.session_state and st.session_state['description']:
                         )
                 else:
                     st.error(f"❌ Error getting answer: {error_msg}")
-    
+                    
     # Show the last answer if it exists
     if st.session_state.get('last_answer'):
         st.subheader('Answer')

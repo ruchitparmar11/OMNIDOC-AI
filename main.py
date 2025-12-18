@@ -52,8 +52,6 @@ try:
     # Define available OpenRouter models
     all_models = [
         'google/gemini-2.0-flash-exp:free',
-        'google/gemini-2.0-flash-lite-preview-02-05:free',
-        'google/gemini-exp-1206:free',
         'google/gemini-pro-1.5'
     ]
 
@@ -196,20 +194,27 @@ init_db()
 # Retry function for OpenRouter API
 import re
 
-def generate_with_retry(prompt, max_retries=3, delay=1):
+def generate_with_retry(prompt, max_retries=5, delay=1):
     global chosen_model, client
     
     # Fallback list for OpenRouter free models
     fallbacks = [
         'google/gemini-2.0-flash-exp:free',
-        'google/gemini-2.0-flash-lite-preview-02-05:free',
-        'google/gemini-exp-1206:free'
+        'meta-llama/llama-3.2-11b-vision-instruct:free',
+        'meta-llama/llama-3-8b-instruct:free',
+        'microsoft/phi-3-mini-128k-instruct:free',
+        'mistralai/mistral-7b-instruct:free',
+        'google/gemini-pro-1.5'
     ]
     
     current_attempt_model = chosen_model
+    tried_models = {current_attempt_model}
+
+    print(f"DEBUG: Starting generation with model: {current_attempt_model}")
 
     for attempt in range(max_retries):
         try:
+            print(f"DEBUG: Attempt {attempt+1}/{max_retries} using {current_attempt_model}")
             response = client.chat.completions.create(
                 model=current_attempt_model,
                 messages=[
@@ -217,19 +222,31 @@ def generate_with_retry(prompt, max_retries=3, delay=1):
                     {"role": "user", "content": prompt}
                 ]
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            print(f"DEBUG: Success! Content length: {len(content) if content else 0}")
+            return content
         except Exception as e:
             error_msg = str(e)
+            print(f"DEBUG: Error on attempt {attempt+1}: {error_msg}")
             
-            # rate limit / quota OR model not found (404)
-            if "429" in error_msg or "quota" in error_msg.lower() or "404" in error_msg or "not found" in error_msg.lower():
-                st.warning(f"⚠️ Issue with `{current_attempt_model}`. Switching models...")
+            # rate limit / quota / model not found / server errors
+            if ("429" in error_msg or 
+                "quota" in error_msg.lower() or 
+                "404" in error_msg or 
+                "not found" in error_msg.lower() or
+                "500" in error_msg or 
+                "502" in error_msg or 
+                "503" in error_msg or
+                "internal server error" in error_msg.lower()):
                 
-                # Check next fallback
+                st.warning(f"⚠️ Issue with `{current_attempt_model}` (Error: {error_msg}). Switching models...")
+                
+                # Check next fallback that hasn't been tried yet
                 found_new = False
                 for fb in fallbacks:
-                    if fb != current_attempt_model:
+                    if fb not in tried_models:
                         current_attempt_model = fb
+                        tried_models.add(fb)
                         found_new = True
                         st.info(f"🔄 Switching to fallback: `{fb}`")
                         break
@@ -245,6 +262,9 @@ def generate_with_retry(prompt, max_retries=3, delay=1):
                  continue
 
             raise e
+
+    raise Exception("Failed to generate content after multiple attempts. Please check API status or try again.")
+
 
 def generate_fallback_description(content, content_type):
     """Generate a basic description when Gemini API fails"""
@@ -770,6 +790,12 @@ if st.button('Generate Description'):
         st.warning('Please upload a file or enter text.')
 
     if content:
+        # Truncate content if it's too long to prevent API errors
+        MAX_CHARS = 50000
+        if len(content) > MAX_CHARS:
+            st.warning(f"⚠️ Document is very large ({len(content)} characters). Truncating to {MAX_CHARS} characters for analysis to fit model limits.")
+            content = content[:MAX_CHARS]
+
         with st.spinner('Generating description...'):
             try:
                 if output_type == "Summary":
@@ -902,15 +928,15 @@ if st.button('Generate Description'):
                     )
                     description = generate_with_retry(detailed_prompt)
 
+                if not description:
+                    description = "No description generated." 
+                
                 # After generating the description, store it in session state
                 st.session_state['description'] = description
                 st.session_state['last_answer'] = ''
                 st.session_state['current_content'] = content
                 st.session_state['current_content_type'] = content_type
 
-                if not description:
-                    description = "No description generated." 
-                
                 # Save to history
                 save_user_history(
                     st.session_state.user_id,
@@ -949,12 +975,22 @@ if st.button('Generate Description'):
 
 # Always show the description if it exists
 if 'description' in st.session_state and st.session_state['description']:
-    st.subheader('Description')
-    st.write(st.session_state['description'])
+    st.markdown("---")
+    st.success("✅ Analysis Complete!")
+    st.subheader('📝 Description')
+    st.markdown(
+        f"""<div style="background-color: #2D4F4A; padding: 20px; border-radius: 10px; border: 1px solid #8DB1A4;">
+            {st.session_state['description']}
+        </div>""", 
+        unsafe_allow_html=True
+    )
     st.subheader('Ask a Question')
-    question = st.text_input('Your question')
+    with st.form(key='qa_form'):
+        question = st.text_input('Your question')
+        submit_button = st.form_submit_button('Get Answer')
 
-    if st.button('Get Answer') and question.strip():
+    if submit_button and question.strip():
+        print(f"DEBUG: Q&A Form submitted. Question: {question}")
         prompt = f"Context: {st.session_state['description']}\n\nQuestion: {question}"
         with st.spinner('Getting answer...'):
             try:

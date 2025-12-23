@@ -116,6 +116,24 @@ def init_db():
         # Column already exists
         pass
 
+    # -- New Tables for Deep Dive --
+    c.execute('''CREATE TABLE IF NOT EXISTS documents
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER NOT NULL,
+                  filename TEXT NOT NULL,
+                  upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  summary TEXT,
+                  suggested_questions TEXT,
+                  FOREIGN KEY (user_id) REFERENCES users (id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS document_chunks
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  document_id INTEGER NOT NULL,
+                  chunk_index INTEGER NOT NULL,
+                  content TEXT NOT NULL,
+                  FOREIGN KEY (document_id) REFERENCES documents (id))''')
+    # ------------------------------
+
     conn.commit()
     conn.close()
 
@@ -178,6 +196,84 @@ def update_history_filename(entry_id, new_filename):
     c.execute("UPDATE user_history SET file_name = ? WHERE id = ?", (new_filename, entry_id))
     conn.commit()
     conn.close()
+
+# --- Deep Dive Backend Functions ---
+
+def store_document_metadata(user_id, filename, summary, questions):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO documents (user_id, filename, summary, suggested_questions) VALUES (?, ?, ?, ?)",
+              (user_id, filename, summary, questions))
+    doc_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return doc_id
+
+def store_chunks(document_id, chunks):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    data = [(document_id, i, chunk) for i, chunk in enumerate(chunks)]
+    c.executemany("INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (?, ?, ?)", data)
+    conn.commit()
+    conn.close()
+
+def get_latest_document(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT id, filename, summary, suggested_questions FROM documents WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def search_chunks(document_id, query, limit=5):
+    """
+    Basic keyword-based retrieval. 
+    Finds chunks that contain the most keywords from the query.
+    """
+    keywords = query.lower().split()
+    # Remove common stop words (very basic list)
+    stop_words = {'the', 'is', 'at', 'which', 'on', 'and', 'a', 'an', 'in', 'to', 'of', 'for', 'it', 'that', 'this'}
+    keywords = [k for k in keywords if k not in stop_words and len(k) > 2]
+    
+    if not keywords:
+        return []
+
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # Construct a query that scores chunks based on keyword presence
+    # This is a simple heuristic: count how many distinct keywords appear in the chunk
+    
+    # We'll fetch all chunks and filter/sort in Python for simplicity and flexibility with small/medium docs
+    # For very large docs, FTS5 in SQLite would be better, but standard LIKE is okay for MVP
+    c.execute("SELECT content FROM document_chunks WHERE document_id = ?", (document_id,))
+    all_chunks = c.fetchall()
+    conn.close()
+    
+    scored_chunks = []
+    for (content,) in all_chunks:
+        score = 0
+        content_lower = content.lower()
+        for k in keywords:
+            if k in content_lower:
+                score += 1
+        if score > 0:
+            scored_chunks.append((score, content))
+            
+    # Sort by score desc, then take top N
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
+    return [chunk for score, chunk in scored_chunks[:limit]]
+
+def generate_suggested_questions(summary):
+    prompt = (
+        f"Based on the following summary of a document, suggest 4-5 interesting/deep questions "
+        f"that a user might want to ask to explore the topic further.\n\n"
+        f"Summary:\n{summary}\n\n"
+        f"Return ONLY the questions, one per line."
+    )
+    return generate_with_retry(prompt)
+
+# -----------------------------------
 
 # Initialize database
 init_db()
@@ -567,7 +663,7 @@ st.write("Upload a file (text, PDF, Word, image, code) or enter text. Get a deta
 # Output type selection
 output_type = st.radio(
     "Select output type:",
-    ("Summary", "Detailed", "Bullet Points", "Q&A"),
+    ("Summary", "Detailed", "Bullet Points", "Q&A", "Deep Dive"),
     horizontal=True
 )
 
@@ -961,6 +1057,52 @@ if st.button('Generate Description'):
                     st.markdown("### Generated Detailed Description")
                     st.write(description)
 
+                elif output_type == "Deep Dive":
+                    # 1. Generate Global Summary
+                    st.info("🌊 Preparing Deep Dive... Generating Global Summary...")
+                    summary_prompt = (
+                        "Read the following content and generate a comprehensive global summary. "
+                        "Cover the main themes, key arguments, and essential details. "
+                        "Content:\n\n{content}"
+                    )
+                    global_summary = process_large_document(content, summary_prompt)
+                    
+                    # 2. Generate Suggested Questions
+                    st.info("🤔 identifying key questions...")
+                    suggested_q_text = generate_suggested_questions(global_summary)
+                    
+                    # 3. Store in DB (Document & Chunks)
+                    st.info("💾 Indexing document for retrieval...")
+                    # Store chunks
+                    chunks = split_text_recursive(content, max_chars=4000) # Smaller chunks for better retrieval
+                    
+                    # Save to DB
+                    doc_id = store_document_metadata(st.session_state.user_id, file_name or "Pasted Text", global_summary, suggested_q_text)
+                    store_chunks(doc_id, chunks)
+                    
+                    # Update Session State
+                    st.session_state['deep_dive_doc_id'] = doc_id
+                    st.session_state['deep_dive_summary'] = global_summary
+                    st.session_state['deep_dive_questions'] = suggested_q_text.split('\n')
+                    st.session_state['deep_dive_active'] = True
+                    
+                    # Fallback for standard description view
+                    description = global_summary 
+                    st.session_state['description'] = description
+                    
+                    # Save to user_history for sidebar visibility
+                    save_user_history(
+                        st.session_state.user_id,
+                        content_type,
+                        content,
+                        description,
+                        suggested_q_text, # Store suggested questions in 'questions' column
+                        "",               # No answers yet
+                        file_name
+                    )
+
+                    st.rerun()
+
                 if not description:
                     description = "No description generated." 
                 
@@ -1006,8 +1148,83 @@ if st.button('Generate Description'):
                 else:
                     st.error(f"❌ Error generating description: {error_msg}")
 
-# Always show the description if it exists
-if 'description' in st.session_state and st.session_state['description']:
+
+
+# Deep Dive specific UI
+if st.session_state.get('deep_dive_active', False) and output_type == "Deep Dive":
+    st.markdown("---")
+    st.markdown("## 🌊 Deep Dive Mode")
+    
+    # 1. Global Summary
+    with st.expander("📄 Global Summary", expanded=True):
+        st.write(st.session_state.get('deep_dive_summary', 'No summary available.'))
+        
+    # 2. Suggested Questions (Interactive Chips)
+    st.write("### 💡 Suggested Questions")
+    suggested_qs = [q for q in st.session_state.get('deep_dive_questions', []) if q.strip()]
+    
+    # Setup chat history for Deep Dive if not exists
+    if 'deep_dive_history' not in st.session_state:
+        st.session_state['deep_dive_history'] = []
+
+    # Handle chip clicks (using columns to simulate chips)
+    cols = st.columns(2)
+    selected_suggested_q = None
+    
+    for i, q in enumerate(suggested_qs):
+        with cols[i % 2]:
+            if st.button(q, key=f"suggest_{i}", use_container_width=True):
+                selected_suggested_q = q
+
+    # 3. Chat Interface
+    st.write("### 💬 Chat with your Document")
+    
+    # Display chat history
+    for msg in st.session_state['deep_dive_history']:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            
+    # Chat Input
+    user_query = st.chat_input("Ask a specific question about the document...")
+    
+    # Determine what to process: selected chip OR typed input
+    final_query = selected_suggested_q if selected_suggested_q else user_query
+    
+    if final_query:
+        # User message
+        with st.chat_message("user"):
+            st.write(final_query)
+        st.session_state['deep_dive_history'].append({"role": "user", "content": final_query})
+        
+        # AI Processing
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Searching document chunks..."):
+                # Retrieve relevant chunks
+                doc_id = st.session_state.get('deep_dive_doc_id')
+                relevant_chunks = search_chunks(doc_id, final_query)
+                
+                context_text = "\n\n---\n\n".join(relevant_chunks) if relevant_chunks else "No specific relevant chunks found."
+                
+                # Construct Prompt
+                rag_prompt = (
+                    f"You are an expert assistant analyzing a specific document. "
+                    f"Answer the user's question based PRIMARILY on the provided context chunks below.\n"
+                    f"If the answer is not in the context, say so, but try to infer from the global summary if possible.\n\n"
+                    f"Global Summary:\n{st.session_state.get('deep_dive_summary', '')}\n\n"
+                    f"Context Chunks:\n{context_text}\n\n"
+                    f"Question: {final_query}"
+                )
+                
+                response = generate_with_retry(rag_prompt)
+                st.write(response)
+                st.session_state['deep_dive_history'].append({"role": "assistant", "content": response})
+                
+                # Force rerun to update chat history visually if it was a button click
+                if selected_suggested_q:
+                    st.rerun()
+
+# Standard Q&A Interface (Hidden if Deep Dive is active to avoid clutter)
+elif 'description' in st.session_state and st.session_state['description']:
     st.markdown("---")
     st.success("✅ Analysis Complete!")
     st.subheader('📝 Description')
@@ -1017,60 +1234,31 @@ if 'description' in st.session_state and st.session_state['description']:
         </div>""", 
         unsafe_allow_html=True
     )
-    st.subheader('Ask a Question')
-    with st.form(key='qa_form'):
-        question = st.text_input('Your question')
-        submit_button = st.form_submit_button('Get Answer')
+    
+    if output_type != "Deep Dive":
+        st.subheader('Ask a Question')
+        with st.form(key='qa_form'):
+            question = st.text_input('Your question')
+            submit_button = st.form_submit_button('Get Answer')
 
-    if submit_button and question.strip():
-        print(f"DEBUG: Q&A Form submitted. Question: {question}")
-        prompt = f"Context: {st.session_state['description']}\n\nQuestion: {question}"
-        with st.spinner('Getting answer...'):
-            try:
-                st.session_state['last_answer'] = generate_with_retry(prompt)
+        if submit_button and question.strip():
+            print(f"DEBUG: Q&A Form submitted. Question: {question}")
+            prompt = f"Context: {st.session_state['description']}\n\nQuestion: {question}"
+            with st.spinner('Getting answer...'):
+                try:
+                    st.session_state['last_answer'] = generate_with_retry(prompt)
 
-                # Save to history
-                if 'current_content' in st.session_state:
-                    current_questions = st.session_state.get('current_questions', '')
-                    current_answers = st.session_state.get('current_answers', '')
-
-                    if current_questions:
-                        current_questions += f"\n---\n{question}"
-                        current_answers += f"\n---\n{st.session_state['last_answer']}"
-                    else:
-                        current_questions = question
-                        current_answers = st.session_state['last_answer']
-
-                    st.session_state['current_questions'] = current_questions
-                    st.session_state['current_answers'] = current_answers
-
-                    # Save to database
-                    save_user_history(
-                        st.session_state.user_id,
-                        st.session_state['current_content_type'],
-                        st.session_state['current_content'],
-                        st.session_state['description'],
-                        current_questions,
-                        current_answers
-                    )
-            except Exception as e:
-                error_msg = str(e)
-                if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
-                    st.warning("🚫 Gemini API is currently overloaded. Using fallback response.")
-                    fallback_answer = f"Based on the content, I can see this is about: {st.session_state['description'][:100]}... However, I cannot provide a detailed answer right now due to API overload. Please try again later for a more comprehensive response."
-                    st.session_state['last_answer'] = fallback_answer
-
-                    # Save fallback answer to history
+                    # Save to history
                     if 'current_content' in st.session_state:
                         current_questions = st.session_state.get('current_questions', '')
                         current_answers = st.session_state.get('current_answers', '')
 
                         if current_questions:
                             current_questions += f"\n---\n{question}"
-                            current_answers += f"\n---\n{fallback_answer}"
+                            current_answers += f"\n---\n{st.session_state['last_answer']}"
                         else:
                             current_questions = question
-                            current_answers = fallback_answer
+                            current_answers = st.session_state['last_answer']
 
                         st.session_state['current_questions'] = current_questions
                         st.session_state['current_answers'] = current_answers
@@ -1084,10 +1272,41 @@ if 'description' in st.session_state and st.session_state['description']:
                             current_questions,
                             current_answers
                         )
-                else:
-                    st.error(f"❌ Error getting answer: {error_msg}")
-                    
-    # Show the last answer if it exists
-    if st.session_state.get('last_answer'):
-        st.subheader('Answer')
-        st.write(st.session_state['last_answer'])
+                except Exception as e:
+                    error_msg = str(e)
+                    if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
+                        st.warning("🚫 Gemini API is currently overloaded. Using fallback response.")
+                        fallback_answer = f"Based on the content, I can see this is about: {st.session_state['description'][:100]}... However, I cannot provide a detailed answer right now due to API overload. Please try again later for a more comprehensive response."
+                        st.session_state['last_answer'] = fallback_answer
+
+                        # Save fallback answer to history
+                        if 'current_content' in st.session_state:
+                            current_questions = st.session_state.get('current_questions', '')
+                            current_answers = st.session_state.get('current_answers', '')
+
+                            if current_questions:
+                                current_questions += f"\n---\n{question}"
+                                current_answers += f"\n---\n{fallback_answer}"
+                            else:
+                                current_questions = question
+                                current_answers = fallback_answer
+
+                            st.session_state['current_questions'] = current_questions
+                            st.session_state['current_answers'] = current_answers
+
+                            # Save to database
+                            save_user_history(
+                                st.session_state.user_id,
+                                st.session_state['current_content_type'],
+                                st.session_state['current_content'],
+                                st.session_state['description'],
+                                current_questions,
+                                current_answers
+                            )
+                    else:
+                        st.error(f"❌ Error getting answer: {error_msg}")
+                        
+        # Show the last answer if it exists
+        if st.session_state.get('last_answer'):
+            st.subheader('Answer')
+            st.write(st.session_state['last_answer'])

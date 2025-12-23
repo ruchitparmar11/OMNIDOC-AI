@@ -27,75 +27,66 @@ else:
 
 # Set OpenRouter API key
 
+# Initialize global variables to avoid NameError
+client = None
+chosen_model = None
+fallback_models = []
+
 try:
-    # Try getting the key, handle both standard naming conventions
-    api_key = st.secrets.get("OPENROUTER_API_KEY") or st.secrets.get("OPENAI_API_KEY")
-    
-    if not api_key:
-        raise KeyError("No OPENROUTER_API_KEY or OPENAI_API_KEY found in secrets.")
-
-    # Manually create httpx client to avoid proxy issues
     import httpx
-    http_client = httpx.Client()
-    
-    # Configure OpenAI client for OpenRouter
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-        http_client=http_client,
-        default_headers={
-            "HTTP-Referer": "http://localhost:8501", # Optional, for including your app on openrouter.ai rankings.
-            "X-Title": "OmniDoc AI", # Optional. Shows in rankings on openrouter.ai.
-        }
-    )
-    
-    # Define available OpenRouter models
-    all_models = [
-        'google/gemini-2.0-flash-exp:free',
-        'google/gemini-pro-1.5'
-    ]
+    http_client = httpx.Client(timeout=60)
 
-    # Prioritized list to just one reliable model (user request)
-    preferences = [
-        'google/gemini-2.0-flash-exp:free'
-    ]
+    grok_api_key = st.secrets.get("GROK_API_KEY") or st.secrets.get("XAI_API_KEY")
+    openrouter_api_key = st.secrets.get("OPENROUTER_API_KEY") or st.secrets.get("OPENAI_API_KEY")
 
-    chosen_model = preferences[0]
-    
-    # Display available models for debugging (User can see this)
+    if grok_api_key:
+        # ✅ Direct xAI Grok
+        client = OpenAI(
+            base_url="https://api.x.ai/v1",
+            api_key=grok_api_key,
+            http_client=http_client
+        )
+        chosen_model = "grok-2-1212"
+        fallback_models = ["grok-2-1212", "grok-2"]
+
+        st.sidebar.success("✅ Using Direct Grok API")
+
+    elif openrouter_api_key:
+        # ✅ OpenRouter (FIXED MODELS)
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=openrouter_api_key,
+            http_client=http_client,
+            default_headers={
+                "HTTP-Referer": "http://localhost:8501",
+                "X-Title": "OmniDoc AI",
+            }
+        )
+
+        chosen_model = "openai/gpt-4o-mini"
+        fallback_models = [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4.1",
+            "meta-llama/llama-3.1-70b-instruct",
+            "google/gemini-1.5-pro",
+        ]
+
+        st.sidebar.success("✅ Using OpenRouter API")
+
+    else:
+        st.error("❌ No API key found. Set GROK_API_KEY or OPENROUTER_API_KEY.")
+        st.stop()
+
     with st.sidebar.expander("🛠️ Model Debug Info"):
-        st.write(f"**Selected Model:** `{chosen_model}`")
-        st.write("**Using OpenRouter API**")
-        st.write("**Available Models:**")
-        for m in all_models:
+        st.write(f"**Primary:** `{chosen_model}`")
+        st.write("**Fallbacks:**")
+        for m in fallback_models:
             st.write(f"- `{m}`")
 
-except KeyError:
-    st.error("❌ API Key not found. Please set `OPENROUTER_API_KEY` in your `.streamlit/secrets.toml`.")
-    st.stop()
 except Exception as e:
-    st.error(f"❌ Error configuring OpenRouter API: {str(e)}")
+    st.error(f"❌ API initialization failed: {e}")
     st.stop()
 
-
-# try:
-#     api_key = st.secrets["GEMINI_API_KEY"]
-# except Exception:
-#     # Fallback for local development
-#     if os.path.exists("api.txt"):
-#         with open("api.txt", "r") as f:
-#             api_key = f.read().strip()
-#     else:
-#         raise RuntimeError("No API key found. Please set GEMINI_API_KEY in secrets or create api.txt.")
-
-# genai.configure(api_key=api_key)
-# model = genai.GenerativeModel('gemini-2.0-flash-exp')
-
-# with open("api.txt", "r") as f:
-#     api_key = f.read().strip()
-# os.environ["GEMINI_API_KEY"] = api_key
-# genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-# model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Database setup
 def init_db():
@@ -194,77 +185,33 @@ init_db()
 # Retry function for OpenRouter API
 import re
 
-def generate_with_retry(prompt, max_retries=5, delay=1):
-    global chosen_model, client
-    
-    # Fallback list for OpenRouter free models
-    fallbacks = [
-        'google/gemini-2.0-flash-exp:free',
-        'meta-llama/llama-3.2-11b-vision-instruct:free',
-        'meta-llama/llama-3-8b-instruct:free',
-        'microsoft/phi-3-mini-128k-instruct:free',
-        'mistralai/mistral-7b-instruct:free',
-        'google/gemini-pro-1.5'
-    ]
-    
-    current_attempt_model = chosen_model
-    tried_models = {current_attempt_model}
+def generate_with_retry(prompt, max_retries=5):
+    global client, chosen_model, fallback_models
 
-    print(f"DEBUG: Starting generation with model: {current_attempt_model}")
+    tried = set()
+    model = chosen_model
 
     for attempt in range(max_retries):
         try:
-            print(f"DEBUG: Attempt {attempt+1}/{max_retries} using {current_attempt_model}")
             response = client.chat.completions.create(
-                model=current_attempt_model,
+                model=model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "system", "content": "You are OmniDoc AI, an expert document assistant."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                temperature=0.3
             )
-            content = response.choices[0].message.content
-            print(f"DEBUG: Success! Content length: {len(content) if content else 0}")
-            return content
+            return response.choices[0].message.content
+
         except Exception as e:
-            error_msg = str(e)
-            print(f"DEBUG: Error on attempt {attempt+1}: {error_msg}")
-            
-            # rate limit / quota / model not found / server errors
-            if ("429" in error_msg or 
-                "quota" in error_msg.lower() or 
-                "404" in error_msg or 
-                "not found" in error_msg.lower() or
-                "500" in error_msg or 
-                "502" in error_msg or 
-                "503" in error_msg or
-                "internal server error" in error_msg.lower()):
-                
-                st.warning(f"⚠️ Issue with `{current_attempt_model}` (Error: {error_msg}). Switching models...")
-                
-                # Check next fallback that hasn't been tried yet
-                found_new = False
-                for fb in fallbacks:
-                    if fb not in tried_models:
-                        current_attempt_model = fb
-                        tried_models.add(fb)
-                        found_new = True
-                        st.info(f"🔄 Switching to fallback: `{fb}`")
-                        break
-                
-                if not found_new:
-                     st.error("⏳ All models exhausted or busy. Please wait.")
-                     time.sleep(5)
-                
-                continue
-            
-            elif "overloaded" in error_msg or "timeout" in error_msg:
-                 time.sleep(delay * (attempt + 1))
-                 continue
+            tried.add(model)
+            available = [m for m in fallback_models if m not in tried]
 
-            raise e
+            if not available:
+                raise RuntimeError("❌ All models failed")
 
-    raise Exception("Failed to generate content after multiple attempts. Please check API status or try again.")
-
+            model = available[0]
+            time.sleep(1)
 
 def generate_fallback_description(content, content_type):
     """Generate a basic description when Gemini API fails"""
@@ -282,6 +229,91 @@ def generate_fallback_description(content, content_type):
             return f"This is a {file_type} file. Content: {content[:200]}..."
     else:
         return f"Text content: {content[:200]}..."
+
+def split_text_recursive(text, max_chars=100000):
+    """Recursively split text into chunks smaller than max_chars"""
+    if len(text) <= max_chars:
+        return [text]
+    
+    # Try filtering by paragraph first
+    split_points = ['\n\n', '\n', '. ', ' ']
+    
+    for split_point in split_points:
+        mid = len(text) // 2
+        # Find nearest split point to middle
+        left_split = text.rfind(split_point, 0, mid)
+        right_split = text.find(split_point, mid)
+        
+        # Determine best split point (closest to middle)
+        if left_split == -1 and right_split == -1:
+            continue
+            
+        if left_split == -1:
+            split_idx = right_split
+        elif right_split == -1:
+            split_idx = left_split
+        else:
+            if (mid - left_split) < (right_split - mid):
+                split_idx = left_split
+            else:
+                split_idx = right_split
+        
+        # Create chunks
+        chunk1 = text[:split_idx + len(split_point)]
+        chunk2 = text[split_idx + len(split_point):]
+        
+        return split_text_recursive(chunk1, max_chars) + split_text_recursive(chunk2, max_chars)
+        
+    # Hard split if no split points found
+    return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+
+def process_large_document(content, prompt_template):
+    """Handles splitting large docs, summarizing chunks, and refining the final answer"""
+    MAX_CHARS = 100000
+    
+    if len(content) <= MAX_CHARS:
+        return generate_with_retry(prompt_template.format(content=content))
+    
+    chunks = split_text_recursive(content, max_chars=MAX_CHARS)
+    st.info(f"📚 Document is large. Processing in {len(chunks)} chunks...")
+    
+    chunk_summaries = []
+    
+    # Initialize session state for partial progress if not exists
+    progress_key = f"proc_progress_{hash(content[:100])}"
+    if progress_key not in st.session_state:
+        st.session_state[progress_key] = []
+        
+    chunk_summaries = st.session_state[progress_key]
+    
+    # Skip already processed chunks
+    start_idx = len(chunk_summaries)
+    if start_idx > 0:
+        st.info(f"⏩ Resuming from chunk {start_idx + 1}...")
+
+    progress_bar = st.progress(start_idx / len(chunks))
+    
+    for i, chunk in enumerate(chunks[start_idx:], start=start_idx):
+        with st.spinner(f"Analyzing part {i+1}/{len(chunks)}..."):
+            try:
+                chunk_prompt = f"Analyze and summarize the following section of a document. Capture key details, facts, and context. \n\nContent:\n{chunk}"
+                summary = generate_with_retry(chunk_prompt)
+                
+                # Append and save immediately
+                chunk_summaries.append(summary)
+                st.session_state[progress_key] = chunk_summaries
+                
+                progress_bar.progress((i + 1) / len(chunks))
+            except Exception as e:
+                st.error(f"❌ Failed on chunk {i+1}. You can try again to resume.")
+                raise e
+            
+    # Final Synthesis
+    st.info("🔄 Synthesizing final result...")
+    combined_summaries = "\n\n".join(chunk_summaries)
+    final_prompt = prompt_template.format(content=combined_summaries)
+    
+    return generate_with_retry(final_prompt)
 
 # All custom CSS for theming has been removed. The app will now use the default Streamlit appearance.
 
@@ -790,33 +822,29 @@ if st.button('Generate Description'):
         st.warning('Please upload a file or enter text.')
 
     if content:
-        # Truncate content if it's too long to prevent API errors
-        MAX_CHARS = 50000
-        if len(content) > MAX_CHARS:
-            st.warning(f"⚠️ Document is very large ({len(content)} characters). Truncating to {MAX_CHARS} characters for analysis to fit model limits.")
-            content = content[:MAX_CHARS]
+        # Display estimated token count (informational)
+        est_tokens = len(content) // 4
+        st.caption(f"📊 **Content Size:** ~{est_tokens} tokens ({len(content)} characters)")
 
         with st.spinner('Generating description...'):
             try:
                 if output_type == "Summary":
-                    detailed_prompt = (
+                    prompt_template = (
                         "Read the following content and generate a concise summary. "
                         "Focus on the main points and keep it brief. "
-                        "Content:\n\n" + content
+                        "Content:\n\n{content}"
                     )
-                    # Generate and display the description immediately
-                    description = generate_with_retry(detailed_prompt)
+                    description = process_large_document(content, prompt_template)
                     st.markdown("### Generated Summary")
                     st.write(description)
 
                 elif output_type == "Bullet Points":
-                    detailed_prompt = (
+                    prompt_template = (
                         "Read the following content and generate a list of key points in bullet format. "
                         "Each bullet should be a distinct, important idea. "
-                        "Content:\n\n" + content
+                        "Content:\n\n{content}"
                     )
-                    # Generate and display the description immediately
-                    description = generate_with_retry(detailed_prompt)
+                    description = process_large_document(content, prompt_template)
                     st.markdown("### Generated Bullet Points")
                     st.write(description)
 
@@ -837,11 +865,13 @@ if st.button('Generate Description'):
                         "List each question on a separate line with clear numbering (1., 2., 3., etc.). "
                         "Be extremely thorough - don't miss any questions regardless of their format. "
                         "If absolutely no questions are found, respond with 'No questions found'.\n\n"
-                        "Content:\n\n" + content
+                        "If absolutely no questions are found, respond with 'No questions found'.\n\n"
+                        "Content:\n\n{content}"
                     )
 
                     with st.spinner('Extracting ALL questions (including those without ?)...'):
-                        questions_text = generate_with_retry(extract_questions_prompt)
+                        # Use process_large_document for extracting questions too, to handle large files
+                        questions_text = process_large_document(content, extract_questions_prompt)
                         st.session_state['extracted_questions'] = questions_text
 
                     # More comprehensive question parsing
@@ -896,7 +926,7 @@ if st.button('Generate Description'):
                                 with st.spinner(f'Generating detailed answer for question {i+1}/{len(questions_list)}...'):
                                     answer_prompt = (
                                         f"Based on the following content, provide a comprehensive, detailed, and thorough answer to this question: {clean_question}\n\n"
-                                        f"Content:\n{content}\n\n"
+                                        f"Content:\n{{content}}\n\n"
                                         f"Question: {clean_question}\n\n"
                                         "Instructions for your answer:\n"
                                         "- Provide a detailed, comprehensive response\n"
@@ -908,7 +938,8 @@ if st.button('Generate Description'):
                                     )
 
                                     try:
-                                        answer = generate_with_retry(answer_prompt)
+                                        # Use process_large_document for answers as well
+                                        answer = process_large_document(content, answer_prompt)
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\n{answer}\n\n---\n")
                                     except Exception as e:
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\nError generating answer: {str(e)}\n\n---\n")
@@ -920,13 +951,15 @@ if st.button('Generate Description'):
                             description = "No valid questions could be extracted from the content."
                     else:
                         description = "No questions were found in the provided content."
-                else:  # Detailed
-                    detailed_prompt = (
+                elif output_type == "Detailed":  # Detailed
+                    prompt_template = (
                         "Read the following content and generate a detailed, comprehensive description. "
                         "Include all important points, context, and nuances. "
-                        "Content:\n\n" + content
+                        "Content:\n\n{content}"
                     )
-                    description = generate_with_retry(detailed_prompt)
+                    description = process_large_document(content, prompt_template)
+                    st.markdown("### Generated Detailed Description")
+                    st.write(description)
 
                 if not description:
                     description = "No description generated." 

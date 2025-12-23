@@ -11,23 +11,35 @@ This guide explains two ways to run OMNIDOC on a different laptop:
 To run the application independently on a new laptop, follow these steps.
 
 ### 1. Pre-requisites
+*   **Git**: Required to clone the repository. [Download Here](https://git-scm.com/downloads)
 *   **Python**: Install Python (version 3.10 or higher recommended). [Download Here](https://www.python.org/downloads/)
     *   *Make sure to check "Add Python to PATH" during installation.*
+*   **VS Code (Optional)**: Recommended code editor. [Download Here](https://code.visualstudio.com/)
 *   **Tesseract OCR**: This is **required** for reading images/PDFs.
     *   Download the Windows installer (e.g., from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki)).
     *   **CRITICAL**: You must install it to the default location: `C:\Program Files\Tesseract-OCR\`.
     *   *Why? The code in `main.py` explicitly looks for `tesseract.exe` in this folder.*
 
-### 2. Copy the Project
-Copy the entire `OMNIDOC` folder to the new laptop.
-*   *Note: You can skip the `__pycache__` folders and `.git` folder if you want to save space.*
+### 2. Get the Code (Clone from GitHub)
+1.  Open a terminal (Command Prompt or PowerShell).
+2.  Navigate to where you want to save the project:
+    ```powershell
+    cd Documents
+    ```
+3.  Clone the repository:
+    ```powershell
+    git clone <YOUR_GITHUB_REPO_URL>
+    ```
+    *(Replace `<YOUR_GITHUB_REPO_URL>` with the actual link found on your GitHub repo page under the green "Code" button)*
+4.  Enter the project folder:
+    ```powershell
+    cd OMNIDOC
+    ```
 
 ### 3. Install Dependencies
-Open a Command Prompt (cmd) or PowerShell on the new laptop.
-1.  Navigate to the project folder:
-    ```powershell
-    cd path\to\OMNIDOC
-    ```
+Open a Command Prompt (cmd) or PowerShell (if not already open).
+1.  Ensure you are inside the `OMNIDOC` folder.
+
 2.  Install the required Python libraries:
     ```powershell
     pip install -r requirements.txt

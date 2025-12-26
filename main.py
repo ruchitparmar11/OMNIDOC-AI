@@ -108,7 +108,7 @@ def init_db():
                   answers TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (id))''')
-    
+
     # Add file_name column if it doesn't exist
     try:
         c.execute("ALTER TABLE user_history ADD COLUMN file_name TEXT")
@@ -169,8 +169,10 @@ def save_user_history(user_id, content_type, content, description, questions="",
                  (user_id, content_type, content, description, questions, answers, file_name) 
                  VALUES (?, ?, ?, ?, ?, ?, ?)""", 
               (user_id, content_type, content, description, questions, answers, file_name))
+    entry_id = c.lastrowid
     conn.commit()
     conn.close()
+    return entry_id
 
 def get_user_history(user_id):
     conn = sqlite3.connect('users.db')
@@ -196,6 +198,30 @@ def update_history_filename(entry_id, new_filename):
     c.execute("UPDATE user_history SET file_name = ? WHERE id = ?", (new_filename, entry_id))
     conn.commit()
     conn.close()
+
+#New: Append Questions and Answers to a history entry
+def update_user_history_qa(entry_id, new_question, new_answer):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+
+    # Get current questions/answers
+    c.execute("SELECT questions, answers FROM user_history WHERE id = ?", (entry_id,))
+    row = c.fetchone()
+
+    if row:
+        current_questions = row[0] if row[0] else ""
+        current_answers = row[1] if row[1] else ""
+
+        # Append new Q&A
+        updated_questions = (current_questions + "\n---\n" + new_question) if current_questions else new_question
+        updated_answers = (current_answers + "\n---\n" + new_answer) if current_answers else new_answer
+        
+        c.execute("UPDATE user_history SET questions = ?, answers = ? WHERE id = ?",
+                  (updated_questions, updated_answers, entry_id))
+        conn.commit()
+
+    conn.close()
+                   
 
 # --- Deep Dive Backend Functions ---
 
@@ -224,6 +250,53 @@ def get_latest_document(user_id):
     row = c.fetchone()
     conn.close()
     return row
+
+def get_document_by_filename(user_id, filename):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT id, summary, suggested_questions FROM documents WHERE user_id = ? AND filename = ? ORDER BY id DESC LIMIT 1", (user_id, filename))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def load_session_callback(description, answers, questions, entry_id, content, content_type, file_name, user_id):
+    st.session_state['description'] = description
+    st.session_state['last_answer'] = answers if answers else ""
+    st.session_state['current_questions'] = questions
+    st.session_state['current_answers'] = answers
+    st.session_state['current_history_id'] = entry_id
+    st.session_state['current_content'] = content
+    st.session_state['current_content_type'] = content_type
+
+    # Check for Deep Dive data
+    doc_data = get_document_by_filename(user_id, file_name)
+    if doc_data:
+        doc_id, doc_summary, doc_questions = doc_data
+        st.session_state['deep_dive_doc_id'] = doc_id
+        st.session_state['deep_dive_summary'] = doc_summary
+        st.session_state['deep_dive_questions'] = doc_questions.split('\n') if doc_questions else []
+        st.session_state['deep_dive_active'] = True
+        st.session_state['output_type_radio'] = "Deep Dive"
+
+        # Reconstruct Deep Dive Chat History
+        dd_history = []
+        if questions and answers:
+            qs = questions.split('\n---\n')
+            ans = answers.split('\n---\n')
+            
+            # Align
+            if len(qs) > len(ans):
+                user_qs = qs[-len(ans):]
+            else:
+                user_qs = qs[:len(ans)]
+                
+            for q, a in zip(user_qs, ans):
+                dd_history.append({"role": "user", "content": q.strip()})
+                dd_history.append({"role": "assistant", "content": a.strip()})
+        
+        st.session_state['deep_dive_history'] = dd_history
+    else:
+        st.session_state['deep_dive_active'] = False
 
 def search_chunks(document_id, query, limit=5):
     """
@@ -664,7 +737,8 @@ st.write("Upload a file (text, PDF, Word, image, code) or enter text. Get a deta
 output_type = st.radio(
     "Select output type:",
     ("Summary", "Detailed", "Bullet Points", "Q&A", "Deep Dive"),
-    horizontal=True
+    horizontal=True,
+    key="output_type_radio"
 )
 
 # Logout button
@@ -814,12 +888,12 @@ if user_history:
                 st.write(f"**Questions:** {questions[:50]}...")
             col1, col2 = st.columns([2, 1])
             with col1:
-                if st.button(f"🔄 Load Session {i+1}", key=f"load_{entry_id}"):
-                    st.session_state['description'] = description
-                    st.session_state['last_answer'] = answers if answers else ""
-                    st.session_state['current_questions'] = questions
-                    st.session_state['current_answers'] = answers
-                    st.rerun()
+                st.button(
+                    f"🔄 Load Session {i+1}", 
+                    key=f"load_{entry_id}",
+                    on_click=load_session_callback,
+                    args=(description, answers, questions, entry_id, content, content_type, file_name, st.session_state.user_id)
+                )
             with col2:
                 if st.button(f"🗑️ Delete", key=f"delete_{entry_id}"):
                     st.session_state['confirm_delete_id'] = entry_id
@@ -1037,6 +1111,18 @@ if st.button('Generate Description'):
                                         # Use process_large_document for answers as well
                                         answer = process_large_document(content, answer_prompt)
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\n{answer}\n\n---\n")
+
+                                        # Store separated_large_document for answers as well 
+                                        answer = process_large_document(content, answer_prompt)
+                                        all_qa_pairs.append(f"**q{i+1}: {clean_question}**\n\n{answer}\n\n---\n")
+
+                                        # Store separated Q&A for history
+                                        if 'temp_questions' not in st.session_state: st.session_state['temp_questions'] = []
+                                        if 'temp_answers' not in st.session_state: st.session_state['temp_answers'] = []
+
+                                        st.session_state['temp_questions'].append(clean_question)
+                                        st.session_state['temp_answers'].append(answer)
+
                                     except Exception as e:
                                         all_qa_pairs.append(f"**Q{i+1}: {clean_question}**\n\nError generating answer: {str(e)}\n\n---\n")
 
@@ -1091,7 +1177,7 @@ if st.button('Generate Description'):
                     st.session_state['description'] = description
                     
                     # Save to user_history for sidebar visibility
-                    save_user_history(
+                    h_id =save_user_history(
                         st.session_state.user_id,
                         content_type,
                         content,
@@ -1100,6 +1186,7 @@ if st.button('Generate Description'):
                         "",               # No answers yet
                         file_name
                     )
+                    st.session_state['history_id'] = h_id
 
                     st.rerun()
 
@@ -1112,16 +1199,27 @@ if st.button('Generate Description'):
                 st.session_state['current_content'] = content
                 st.session_state['current_content_type'] = content_type
 
+                # Prepare Q&A for saving if avaliable from Q&A mode
+                save_qs = ""
+                save_as = ""
+                if 'temp_questions' in st.session_state and  st.session_state['temp_questions']:
+                    save_qs = "\n---\n".join(st.session_state['temp_questions'])
+                    save_as = "\n---\n".join(st.session_state['temp_answers'])
+                    #Clear temp
+                    del st.session_state['temp_questions']
+                    del st.session_state['temp_answers']
+
                 # Save to history
-                save_user_history(
+                h_id = save_user_history(
                     st.session_state.user_id,
                     content_type,
                     content,
                     description,
-                    "",  # No questions yet
-                    "",  # No answers yet
+                    save_qs,
+                    save_as,
                     file_name
                 )
+                st.session_state['current_history_id'] = h_id
                 st.rerun()  # Refresh to show in history immediately
             except Exception as e:
                 error_msg = str(e)
@@ -1137,7 +1235,7 @@ if st.button('Generate Description'):
                     st.session_state['current_content_type'] = content_type
     
                     # Save fallback description to history
-                    save_user_history(
+                    h_id = save_user_history(
                         st.session_state.user_id,
                         content_type,
                         content,
@@ -1145,6 +1243,7 @@ if st.button('Generate Description'):
                         "",  # No questions yet
                         ""   # No answers yet
                     )
+                    st.session_state['current_history_id'] = h_id
                 else:
                     st.error(f"❌ Error generating description: {error_msg}")
 
@@ -1218,6 +1317,10 @@ if st.session_state.get('deep_dive_active', False) and output_type == "Deep Dive
                 response = generate_with_retry(rag_prompt)
                 st.write(response)
                 st.session_state['deep_dive_history'].append({"role": "assistant", "content": response})
+
+                # Save Q&A to database
+                if st.session_state.get('current_history_id'):
+                    update_user_history_qa(st.session_state['current_history_id'], final_query, response)
                 
                 # Force rerun to update chat history visually if it was a button click
                 if selected_suggested_q:
@@ -1263,15 +1366,20 @@ elif 'description' in st.session_state and st.session_state['description']:
                         st.session_state['current_questions'] = current_questions
                         st.session_state['current_answers'] = current_answers
 
-                        # Save to database
-                        save_user_history(
-                            st.session_state.user_id,
-                            st.session_state['current_content_type'],
-                            st.session_state['current_content'],
-                            st.session_state['description'],
+                        # Save to database(Update existing or create new)
+                        if st.session_state.get('current_history_id'):
+                            update_user_history_qa(st.session_state['current_history_id'], question, st.session_state['last_answer'])
+                        else:
+                            #Fallback if no history ID track (should happen rarely/legacy)
+                            h_id = save_user_history(
+                                st.session_state.user_id,
+                                st.session_state['current_content_type'],
+                                st.session_state['current_content'],
+                                st.session_state['description'],
                             current_questions,
                             current_answers
                         )
+                        st.session_state['current_history_id'] = h_id
                 except Exception as e:
                     error_msg = str(e)
                     if "overloaded" in error_msg or "timeout" in error_msg or "deadline" in error_msg:
@@ -1294,15 +1402,19 @@ elif 'description' in st.session_state and st.session_state['description']:
                             st.session_state['current_questions'] = current_questions
                             st.session_state['current_answers'] = current_answers
 
-                            # Save to database
-                            save_user_history(
-                                st.session_state.user_id,
-                                st.session_state['current_content_type'],
-                                st.session_state['current_content'],
-                                st.session_state['description'],
-                                current_questions,
-                                current_answers
+                            # Save to database (Update existing or create new)
+                            if st.session_state.get('current_history_id'):
+                                update_user_history_qa(st.session_state['current_history_id'], question, fallback_answer)
+                            else:
+                                h_id = save_user_history(
+                                    st.session_state.user_id,
+                                    st.session_state['current_content_type'],
+                                    st.session_state['current_content'],
+                                    st.session_state['description'],
+                                    current_questions,
+                                    current_answers
                             )
+                            st.session_state['current_history_id'] = h_id
                     else:
                         st.error(f"❌ Error getting answer: {error_msg}")
                         

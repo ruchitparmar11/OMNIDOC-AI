@@ -18,3 +18,18 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+# Ignore database and vector stores
+qdrant_db/
+*.db
+users.db
+
+# Ignore temp files
+tmp_*.json
+_db_schema.txt
+*.pyc
+__pycache__/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+

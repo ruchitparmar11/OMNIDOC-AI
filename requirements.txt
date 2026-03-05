@@ -14,3 +14,5 @@ fpdf2
 pdf2image
 openai
 httpx
+bcrypt
+PyJWT

@@ -1,0 +1,860 @@
+import os
+import sqlite3
+import hashlib
+import bcrypt
+import jwt
+from functools import wraps
+import time
+import tempfile
+import json
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
+import csv
+import io
+import stripe
+from openai import OpenAI
+import httpx
+import concurrent.futures
+import requests
+from bs4 import BeautifulSoup
+
+# Extractors (assuming these exist from main.py)
+from utils.extract_pdf import extract_text_from_pdf
+from utils.extract_word import extract_text_from_word
+from utils.extract_image import extract_text_from_image
+from utils.extract_code import extract_text_from_code
+
+app = Flask(__name__)
+# Enable CORS for the frontend React application running on port 5173
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# Simple parser for secrets.toml
+API_KEY = None
+try:
+    with open(".streamlit/secrets.toml", "r") as f:
+        for line in f:
+            if "OPENROUTER_API_KEY" in line:
+                API_KEY = line.split("=")[1].strip().strip('"').strip("'")
+                break
+except Exception as e:
+    print(f"Failed to load OpenRouter API key: {e}")
+
+client = None
+if API_KEY:
+    http_client = httpx.Client(timeout=60)
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=API_KEY,
+        http_client=http_client,
+        default_headers={
+            "HTTP-Referer": "http://localhost:5173",
+            "X-Title": "OmniDoc AI React",
+        }
+    )
+
+def generate_with_retry(prompt, system_prompt="You are OmniDoc AI, an expert document assistant. Provide the most critical highlights.", model="openai/gpt-4o-mini", max_retries=3):
+    if not client:
+        return "Warning: AI API not initialized. The prompt was: " + prompt[:100] + "..."
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            time.sleep(1)
+            if attempt == max_retries - 1:
+                return f"Error: Failed to generate response ({e})"
+
+def chunk_text(text, chunk_size=2000, overlap=300):
+    chunks = []
+    start = 0
+    text_len = len(text)
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunks.append(text[start:end])
+        start += (chunk_size - overlap)
+    return chunks
+
+# Lazy load our neural embedding model
+embedder = None
+reranker = None
+
+def get_embedder():
+    global embedder
+    if embedder is None:
+        # MiniLM is incredibly fast and lightweight for document semantic search
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    return embedder
+
+def get_reranker():
+    global reranker
+    if reranker is None:
+        from sentence_transformers import CrossEncoder
+        # A lightweight cross-encoder for extremely accurate reranking
+        reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    return reranker
+
+# Initialize Persistent Qdrant Database
+try:
+    q_client = QdrantClient(path="qdrant_db")
+    try:
+        q_client.get_collection("omnidoc_chunks")
+    except Exception:
+        q_client.create_collection(
+            collection_name="omnidoc_chunks",
+            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        )
+except Exception as e:
+    print(f"Warning: Failed to init Qdrant ({e})")
+    q_client = None
+
+def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
+    if not q_client:
+        return default_text[:15000] # Fallback
+        
+    try:
+        # We can pass one or multiple history_ids for Multi-Document Search
+        if isinstance(history_ids, int):
+            history_ids = [history_ids]
+            
+        model = get_embedder()
+        question_embedding = model.encode([question], convert_to_numpy=True)[0]
+        
+        # 1. DENSE RETRIEVAL (Qdrant Database) - Fetches directly from disk!
+        dense_top_k = 15
+        search_result = q_client.search(
+            collection_name="omnidoc_chunks",
+            query_vector=question_embedding.tolist(),
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="history_id",
+                        match=MatchAny(any=history_ids)
+                    )
+                ]
+            ),
+            limit=dense_top_k
+        )
+        
+        if not search_result:
+             return default_text[:15000]
+             
+        dense_chunks = [hit.payload['text'] for hit in search_result]
+        
+        # 2. SPARSE RETRIEVAL (BM25) - Done on the candidates
+        from rank_bm25 import BM25Okapi
+        tokenized_chunks = [chunk.lower().split() for chunk in dense_chunks]
+        bm25 = BM25Okapi(tokenized_chunks)
+        tokenized_query = question.lower().split()
+        bm25_scores = bm25.get_scores(tokenized_query)
+        sparse_indices = np.argsort(bm25_scores)[::-1].tolist()
+        
+        # 3. RECIPROCAL RANK FUSION (RRF)
+        rrf_scores = {}
+        rrf_k = 60
+        
+        for rank, hit in enumerate(search_result):
+            # idx tracking within candidate list
+            rrf_scores[rank] = rrf_scores.get(rank, 0) + 1 / (rrf_k + rank + 1)
+            
+        for rank, idx in enumerate(sparse_indices):
+            rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (rrf_k + rank + 1)
+            
+        hybrid_indices = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        
+        # 4. RERANKING (Cross-Encoder)
+        rerank_model = get_reranker()
+        cross_inp = [[question, dense_chunks[i]] for i in hybrid_indices]
+        cross_scores = rerank_model.predict(cross_inp)
+        
+        reranked_pairs = sorted(zip(hybrid_indices, cross_scores), key=lambda x: x[1], reverse=True)
+        final_top_indices = [pair[0] for pair in reranked_pairs[:top_k]]
+        
+        # Sort by chunk_index to keep chronlogical order from the document
+        final_top_hits = [search_result[i] for i in final_top_indices]
+        final_top_hits.sort(key=lambda hit: hit.payload.get('chunk_index', 0))
+        
+        relevant_context = "\n\n...[SNIP]...\n\n".join([hit.payload['text'] for hit in final_top_hits])
+        return relevant_context
+    except Exception as e:
+        print(f"Advanced RAG Pipeline Error: {e}")
+        return default_text[:15000]
+
+def generate_chat_stream(messages, history_id, question, chat_history, model="openai/gpt-4o-mini", max_retries=3):
+    full_answer = ""
+    if not client:
+        yield f"data: {json.dumps({'content': 'Warning: AI API not initialized.'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+        
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                stream=True
+            )
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    content = chunk.choices[0].delta.content
+                    full_answer += content
+                    yield f"data: {json.dumps({'content': content})}\n\n"
+            break
+        except Exception as e:
+            time.sleep(1)
+            if attempt == max_retries - 1:
+                yield f"data: {json.dumps({'content': f'Error streaming ({e})'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+                
+    if full_answer:
+        chat_history.append({"role": "user", "content": question})
+        chat_history.append({"role": "ai", "content": full_answer})
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("UPDATE user_history SET answers = ? WHERE id = ?", (json.dumps(chat_history), history_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+            
+    yield "data: [DONE]\n\n"
+
+def hash_password(password):
+    """Hash a password with bcrypt (new accounts)."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def check_password(password, stored_hash):
+    """Verify bcrypt or fallback sha256 hashes."""
+    try:
+        return bcrypt.checkpw(password.encode(), stored_hash.encode())
+    except Exception:
+        import hashlib
+        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+
+JWT_SECRET = os.environ.get("JWT_SECRET", "omnidoc-supersecret-dev-key-2026")
+
+def make_token(user_id, role):
+    return jwt.encode({"user_id": user_id, "role": role}, JWT_SECRET, algorithm="HS256")
+
+def require_admin(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            if payload.get("role") != "admin":
+                return jsonify({"success": False, "message": "Admin access required"}), 403
+        except Exception:
+            return jsonify({"success": False, "message": "Invalid or missing token"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+def get_db_connection():
+    conn = sqlite3.connect('users.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+    
+    if not username or not password:
+        return jsonify({"success": False, "message": "Username and password required"}), 400
+        
+    role = 'admin' if username.lower() == 'admin' else 'user'
+    is_premium = 1 if role == 'admin' else 0
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username, password_hash, role, analysis_count, is_premium) VALUES (?, ?, ?, 0, ?)", 
+                  (username, hash_password(password), role, is_premium))
+        conn.commit()
+        
+        # Fetch the newly created user
+        user_id = c.lastrowid
+        c.execute("SELECT id, username, role, analysis_count, is_premium FROM users WHERE id = ?", (user_id,))
+        user = c.fetchone()
+        
+        token = make_token(user_id, role)
+        return jsonify({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user['id'],
+                "username": user['username'],
+                "role": user['role'],
+                "analysis_count": user['analysis_count'],
+                "is_premium": bool(user['is_premium'])
+            }
+        })
+    except sqlite3.IntegrityError:
+        return jsonify({"success": False, "message": "Username already exists"}), 409
+    finally:
+        conn.close()
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = ?", (username,))
+    user = c.fetchone()
+    if user and not check_password(password, user["password_hash"]):
+        user = None
+    conn.close()
+    
+    if user:
+        token = make_token(user['id'], user['role'])
+        return jsonify({
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user['id'],
+                "username": user['username'],
+                "role": user['role'],
+                "analysis_count": user['analysis_count'],
+                "is_premium": bool(user['is_premium'])
+            }
+        })
+    return jsonify({"success": False, "message": "Invalid username or password"}), 401
+
+@app.route('/api/history/<int:user_id>', methods=['GET'])
+def get_user_history(user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""SELECT content_type, content, description, questions, answers, created_at, id, file_name, folder_name 
+                 FROM user_history WHERE user_id = ? ORDER BY created_at DESC""", (user_id,))
+    history = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "history": history})
+
+@app.route('/api/history/<int:history_id>/rename', methods=['PATCH'])
+def rename_history(history_id):
+    data = request.json
+    new_name = data.get('name', '').strip()
+    if not new_name:
+        return jsonify({"success": False, "message": "Name required"}), 400
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE user_history SET file_name = ? WHERE id = ?", (new_name, history_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/history/<int:history_id>', methods=['DELETE'])
+def delete_history(history_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM user_history WHERE id = ?", (history_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_content():
+    user_id = request.form.get('user_id')
+    output_type = request.form.get('output_type', 'Summary')
+    text_input = request.form.get('text', '')
+    folder_name = request.form.get('folder_name', 'Recent')
+
+    if not user_id:
+        return jsonify({"success": False, "message": "User ID required"}), 400
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT role, analysis_count, is_premium FROM users WHERE id = ?", (user_id,))
+    user = c.fetchone()
+    
+    if not user:
+        conn.close()
+        return jsonify({"success": False, "message": "User not found"}), 404
+
+    role = user['role']
+    is_premium = bool(user['is_premium'])
+    analysis_count = user['analysis_count']
+
+    if role != 'admin' and not is_premium and analysis_count >= 4:
+        conn.close()
+        return jsonify({"success": False, "message": "Free tier limit reached. Please upgrade to Premium."}), 403
+    
+    # Extract history_id correctly without throwing exceptions if it's 'null' string
+    history_id = None
+    if request.form.get('history_id') and str(request.form.get('history_id')).strip() != 'null':
+        try:
+            history_id = int(request.form.get('history_id'))
+        except:
+            history_id = None
+
+    if history_id and output_type != "Summary":
+        # Studio generation on an EXISTING document! 
+        # Skip extraction, reuse the content, and append to the existing DB row
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = ? AND user_id = ?", (history_id, user_id))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"success": False, "message": "Original document not found"}), 404
+            
+        content = row['content']
+        answers_str = row['answers']
+        file_name = row['file_name']
+        content_type = row['content_type']
+        
+        # Determine persona
+        persona = "You are OmniDoc AI, an expert document assistant. Provide the most critical highlights."
+        if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+            persona = "You are a Senior Principal Software Engineer. Analyze the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+        elif content_type == 'csv':
+            persona = "You are an Elite Data Scientist and Data Analyst. Analyze this raw data, extract key statistical trends, and explain the relationships clearly."
+        elif content_type in ['pdf', 'doc', 'docx']:
+            persona = "You are an expert Document Analyst and Legal/Business Consultant. Read this document, extract the core arguments, pinpoint critical clauses, and provide a high-level briefing."
+            
+        # Determine prompt
+        prompt = ""
+        if output_type == "audio":
+            prompt = f"Write an engaging, conversational podcast script discussing the key points of this document:\n\n{content[:15000]}"
+        elif output_type == "slide":
+            prompt = f"Create a comprehensive slide deck presentation outline for this document. For each slide, provide a Title and Bullet Points:\n\n{content[:15000]}"
+        elif output_type == "video":
+            prompt = f"Write a detailed storyboard and script for an educational YouTube video explaining the contents of this document:\n\n{content[:15000]}"
+        elif output_type == "mindmap":
+            prompt = f"Extract a structured hierarchical mind map from this document. Use clear indentation and bullet points to map out core concepts, subtopics, and relationships:\n\n{content[:15000]}"
+        elif output_type == "reports":
+            prompt = f"Generate a formal, highly structured business report summarizing this document's findings, including an executive summary, methodology (if applicable), core findings, and recommendations:\n\n{content[:15000]}"
+        elif output_type == "flashcards":
+            prompt = f"Create 10 study flashcards based on this document. Format them strictly as:\nQ: [Question]\nA: [Answer]\n\n{content[:15000]}"
+        elif output_type == "quiz":
+            prompt = f"Create a multiple-choice quiz with 5 challenging questions based on this document. Provide 4 options per question and include the correct answers at the end:\n\n{content[:15000]}"
+        elif output_type == "infographic":
+            prompt = f"Design a text-based blueprint for an infographic based on this document. Propose main section headers, key statistics, bullet points, and suggestions for visual icons/charts:\n\n{content[:15000]}"
+        elif output_type == "datatable":
+            prompt = f"Extract the key entities, metrics, categories, or factual properties from this document and organize them into a clean, comprehensive Markdown table:\n\n{content[:15000]}"
+        else:
+            prompt = f"Please provide a {output_type} of the following document content:\n\n{content[:15000]}"
+            
+        description = generate_with_retry(prompt, persona)
+        
+        # Append to answers
+        try:
+            chat_history = json.loads(answers_str) if answers_str else []
+        except:
+            chat_history = []
+            
+        # Filter existing studio of the same type to avoid bloat (optional, but good for keeping history clean)
+        chat_history = [msg for msg in chat_history if not (msg.get('role') == 'studio' and msg.get('feature') == output_type)]
+        
+        chat_history.append({
+            "role": "studio",
+            "feature": output_type,
+            "content": description
+        })
+        
+        c.execute("UPDATE user_history SET answers = ? WHERE id = ?", (json.dumps(chat_history), history_id))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "success": True, 
+            "data": {
+                "id": history_id,
+                "description": description,
+                "feature": output_type
+            }
+        })
+
+    # === STANDARD ANALYSIS (New Document) ===
+    content = text_input
+    content_type = "text"
+    file_name = None
+
+    MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+    if 'file' in request.files:
+        file = request.files['file']
+        if file.filename:
+            file.seek(0, 2)
+            file_size = file.tell()
+            file.seek(0)
+            if file_size > MAX_FILE_SIZE:
+                return jsonify({"success": False, "message": f"File too large. Maximum allowed size is 20 MB (your file: {file_size // (1024*1024)} MB)."}), 413
+            file_name = file.filename
+            content_type = file.filename.split('.')[-1].lower()
+            
+            # Save file temporarily to extract text
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{content_type}") as tmp:
+                file.save(tmp.name)
+                tmp_path = tmp.name
+                
+            try:
+                if content_type == 'pdf':
+                    content = extract_text_from_pdf(tmp_path)
+                elif content_type in ['doc', 'docx']:
+                    content = extract_text_from_word(tmp_path)
+                elif content_type in ['png', 'jpg', 'jpeg']:
+                    content = extract_text_from_image(tmp_path)
+                elif content_type in ['py', 'json', 'txt', 'js', 'html', 'css', 'jsx', 'ts', 'tsx', 'csv', 'md', 'env', 'xml']:
+                    content = extract_text_from_code(tmp_path)
+                else:
+                    with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+            except Exception as e:
+                return jsonify({"success": False, "message": f"File extraction error: {str(e)}"}), 500
+            finally:
+                os.unlink(tmp_path)
+    # If no file was uploaded, check if the text input is actually a URL
+    elif text_input.strip().startswith('http://') or text_input.strip().startswith('https://'):
+        url = text_input.strip()
+        try:
+            # Mask as a standard browser to avoid basic blocks
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Extract text carefully, dropping scripts and styles
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.extract()
+            content = soup.get_text(separator='\n', strip=True)
+            content_type = "url"
+            file_name = url
+        except Exception as e:
+            return jsonify({"success": False, "message": f"URL scraping failed: {str(e)}"}), 500
+    # Web Search Agent Feature
+    elif text_input.strip().startswith('/search '):
+        query = text_input.replace('/search ', '').strip()
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=5))
+                
+            if not results:
+                content = f"No search results found for query: {query}"
+            else:
+                content = f"Web Search Context for query '{query}':\n\n"
+                for i, r in enumerate(results):
+                    content += f"[{i+1}] {r.get('title')}\nSnippet: {r.get('body')}\nURL: {r.get('href')}\n\n"
+            content_type = "web_search"
+            file_name = f"Search: {query[:30]}..."
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Web Search failed. Please install 'duckduckgo_search' if missing. Error: {str(e)}"}), 500
+            
+    if not content:
+        return jsonify({"success": False, "message": "No content provided to analyze"}), 400
+
+    # Determine personalized AI persona based on document type
+    persona = "You are OmniDoc AI, an expert document assistant. Provide the most critical highlights."
+    if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+        persona = "You are a Senior Principal Software Engineer. Analyze the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+    elif content_type == 'csv':
+        persona = "You are an Elite Data Scientist and Data Analyst. Analyze this raw data, extract key statistical trends, and explain the relationships clearly."
+    elif content_type in ['pdf', 'doc', 'docx']:
+        persona = "You are an expert Document Analyst and Legal/Business Consultant. Read this document, extract the core arguments, pinpoint critical clauses, and provide a high-level briefing."
+
+    # Determine custom advanced prompt based on output_type
+    if output_type == "audio":
+        prompt = f"Write an engaging, conversational podcast script discussing the key points of this document:\n\n{content[:15000]}"
+    elif output_type == "slide":
+        prompt = f"Create a comprehensive slide deck presentation outline for this document. For each slide, provide a Title and Bullet Points:\n\n{content[:15000]}"
+    elif output_type == "video":
+        prompt = f"Write a detailed storyboard and script for an educational YouTube video explaining the contents of this document:\n\n{content[:15000]}"
+    elif output_type == "mindmap":
+        prompt = f"Extract a structured hierarchical mind map from this document. Use clear indentation and bullet points to map out core concepts, subtopics, and relationships:\n\n{content[:15000]}"
+    elif output_type == "reports":
+        prompt = f"Generate a formal, highly structured business report summarizing this document's findings, including an executive summary, methodology (if applicable), core findings, and recommendations:\n\n{content[:15000]}"
+    elif output_type == "flashcards":
+        prompt = f"Create 10 study flashcards based on this document. Format them strictly as:\nQ: [Question]\nA: [Answer]\n\n{content[:15000]}"
+    elif output_type == "quiz":
+        prompt = f"Create a multiple-choice quiz with 5 challenging questions based on this document. Provide 4 options per question and include the correct answers at the end:\n\n{content[:15000]}"
+    elif output_type == "infographic":
+        prompt = f"Design a text-based blueprint for an infographic based on this document. Propose main section headers, key statistics, bullet points, and suggestions for visual icons/charts:\n\n{content[:15000]}"
+    elif output_type == "datatable":
+        prompt = f"Extract the key entities, metrics, categories, or factual properties from this document and organize them into a clean, comprehensive Markdown table:\n\n{content[:15000]}"
+    else:
+        prompt = f"Please provide a {output_type} of the following document content:\n\n{content[:15000]}"
+    questions_prompt = f"Based on this content, suggest 3 highly analytical follow-up questions I should ask about it:\n{content[:10000]}"
+    
+    # Run API calls concurrently to slice processing time in half
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        future_desc = executor.submit(generate_with_retry, prompt, persona)
+        future_ques = executor.submit(generate_with_retry, questions_prompt, persona)
+        description = future_desc.result()
+        questions = future_ques.result()
+    
+    answers_str = None
+    if output_type not in ["Summary", "Detailed", "Bullet Points", "Deep Dive"]:
+        answers_str = json.dumps([{"role": "studio", "feature": output_type, "content": description}])
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""INSERT INTO user_history (user_id, content_type, content, description, questions, answers, file_name, folder_name) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
+    entry_id = c.lastrowid
+    
+    # Store document embeddings directly into Qdrant for persistent RAG querying!
+    if q_client and content:
+        import uuid
+        chunks = chunk_text(content, chunk_size=1500, overlap=300)
+        if chunks:
+             emb_model = get_embedder()
+             embeddings = emb_model.encode(chunks, convert_to_numpy=True)
+             points = []
+             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+                 points.append(
+                     PointStruct(
+                         id=str(uuid.uuid4()),
+                         vector=emb.tolist(),
+                         payload={
+                             "history_id": entry_id, 
+                             "text": chunk, 
+                             "chunk_index": i,
+                             "file_name": file_name
+                         }
+                     )
+                 )
+             q_client.upsert(collection_name="omnidoc_chunks", points=points)
+             
+    # Increment analysis count
+    c.execute("UPDATE users SET analysis_count = analysis_count + 1 WHERE id = ?", (user_id,))
+    conn.commit()
+    
+    # Fetch updated user explicitly over to send to client
+    c.execute("SELECT analysis_count FROM users WHERE id = ?", (user_id,))
+    updated_count = c.fetchone()['analysis_count']
+    
+    conn.close()
+
+    return jsonify({
+        "success": True, 
+        "data": {
+            "id": entry_id,
+            "description": description,
+            "questions": questions.split('\n'),
+            "fileName": file_name,
+            "analysis_count": updated_count,
+            "content": content
+        }
+    })
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    data = request.json
+    history_id = data.get('history_id')
+    history_ids = data.get('history_ids')
+    question = data.get('question')
+    
+    if not (history_id or history_ids) or not question:
+        return jsonify({"success": False, "message": "Missing history_id(s) or question"}), 400
+        
+    if not history_ids:
+        history_ids = [history_id]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    placeholders = ','.join('?' for _ in history_ids)
+    c.execute(f"SELECT id, content, answers, content_type FROM user_history WHERE id IN ({placeholders})", tuple(history_ids))
+    rows = c.fetchall()
+    
+    if not rows:
+        conn.close()
+        return jsonify({"success": False, "message": "History not found"}), 404
+        
+    combined_content = "\n\n--- NEXT DOCUMENT ---\n\n".join([r['content'] for r in rows])
+    content_type = rows[0]['content_type'] if rows[0]['content_type'] else 'txt'  # Use the first one's type as default persona
+    
+    # 3. Retrieve relevant chunks using Qdrant persistent RAG logic
+    rag_context = retrieve_relevant_chunks(question, history_ids, combined_content, top_k=5)[:25000]
+    
+    answers_str = rows[0]['answers']  # Store answers in the first document for simplicity
+
+    if answers_str:
+        try:
+            raw_history = json.loads(answers_str)
+            # Filter out studio entries - they are not valid OpenAI message roles
+            chat_history = [m for m in raw_history if m.get('role') in ('user', 'ai', 'assistant')]
+        except json.JSONDecodeError:
+            chat_history = []
+    else:
+        chat_history = []
+
+    # Determine personalized AI persona based on document type
+    persona = "You are OmniDoc AI, an expert document assistant. You are answering a user's questions based on the document."
+    if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+        persona = "You are a Senior Principal Software Engineer. Answer the user's questions about the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+    elif content_type == 'csv':
+        persona = "You are an Elite Data Scientist and Data Analyst. Answer the user's questions about the raw data, extract key statistical trends, and explain the relationships clearly."
+    elif content_type in ['pdf', 'doc', 'docx']:
+        persona = "You are an expert Document Analyst and Legal/Business Consultant. Answer the user's questions about the document, extract the core arguments, pinpoint critical clauses, and provide high-level briefings."
+        
+    # Construct complete message history with document context
+    messages = [
+        {"role": "system", "content": f"{persona}\n\nDOCUMENT CONTEXT (retrieved snippets):\n{rag_context}"}
+    ]
+    
+    # Append previous chat turns (only user/ai/assistant roles)
+    for msg in chat_history:
+        role = 'assistant' if msg.get('role') in ('ai', 'assistant') else 'user'
+        content = msg.get('content', '')
+        if content:
+            messages.append({"role": role, "content": content})
+        
+    messages.append({"role": "user", "content": question})
+    conn.close()
+    
+    # Will save the chat stream to the first history_id passed
+    return Response(generate_chat_stream(messages, history_ids[0], question, chat_history), mimetype='text/event-stream')
+
+import uuid
+
+@app.route('/api/share/<int:history_id>', methods=['POST'])
+def share_history(history_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT shared_id FROM user_history WHERE id = ?", (history_id,))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "message": "History not found"}), 404
+        
+    shared_id = row['shared_id']
+    if not shared_id:
+        shared_id = str(uuid.uuid4())
+        c.execute("UPDATE user_history SET shared_id = ? WHERE id = ?", (shared_id, history_id))
+        conn.commit()
+        
+    conn.close()
+    return jsonify({"success": True, "shared_id": shared_id})
+
+@app.route('/api/shared/<shared_id>', methods=['GET'])
+def get_shared_history(shared_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = ?", (shared_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return jsonify({"success": False, "message": "Shared document not found"}), 404
+        
+    return jsonify({"success": True, "data": dict(row)})
+
+@app.route('/api/admin/users', methods=['GET'])
+@require_admin
+def admin_users():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
+    users = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "users": users})
+
+@app.route('/api/admin/history', methods=['GET'])
+@require_admin
+def admin_history():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT h.id, h.content_type, h.file_name, h.created_at, u.username as user FROM user_history h JOIN users u ON h.user_id = u.id ORDER BY h.created_at DESC LIMIT 100")
+    history = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify({"success": True, "history": history})
+
+@app.route('/api/admin/export', methods=['GET'])
+@require_admin
+def admin_export_csv():
+    # In a real app, verify admin role here via token/session
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
+    users = c.fetchall()
+    conn.close()
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['ID', 'Username', 'Role', 'Analysis Count', 'Premium Status'])
+    for u in users:
+        cw.writerow([u['id'], u['username'], u['role'], u['analysis_count'], 'Yes' if u['is_premium'] else 'No'])
+
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=omnidoc_users.csv"}
+    )
+
+# Configure Stripe API Key here (using a placeholder or standard test fallback)
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+@app.route('/api/create-checkout-session', methods=['POST'])
+def create_checkout_session():
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        
+        # If no stripe key is provided, we simulate the success via direct redirect so the app doesn't break
+        if not stripe.api_key:
+            return jsonify({
+                "success": True, 
+                "url": f"http://localhost:5173/?success=true&user_id={user_id}"
+            })
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {
+                        'name': 'OMNIDOC AI Premium',
+                        'description': 'Unlimited AI Document Analysis and Vector RAG Search',
+                    },
+                    'unit_amount': 1500, # $15.00
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=f"http://localhost:5173/?success=true&user_id={user_id}",
+            cancel_url=f"http://localhost:5173/?canceled=true",
+        )
+        return jsonify({"success": True, "url": session.url})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/api/user/checkout-success', methods=['POST'])
+def checkout_success():
+    data = request.json
+    user_id = data.get('user_id')
+    
+    # Normally, this is handled by a Secure Stripe Webhook. 
+    # For local testing, we update the DB when the Frontend redirects back.
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE users SET is_premium = 1 WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+if __name__ == '__main__':
+    # Run the Flask app on port 5000
+    app.run(host='0.0.0.0', port=5000, debug=True)

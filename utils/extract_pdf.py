@@ -9,9 +9,22 @@ def extract_text_from_pdf(file_path):
     try:
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
+                # 1. First extract text
                 extracted = page.extract_text()
                 if extracted:
-                    text += extracted + "\n"
+                    text += extracted + "\n\n"
+                    
+                # 2. Extract tables beautifully with layout preservation to markdown format
+                tables = page.extract_tables()
+                if tables:
+                    for table_idx, table in enumerate(tables):
+                        if not table: continue
+                        text += f"### Table {table_idx + 1} (Page {page.page_number})\n"
+                        for row in table:
+                            # Clean up cells to remove newlines, making them markdown safe
+                            clean_row = [" ".join(str(cell).split()) if cell else "" for cell in row]
+                            text += "| " + " | ".join(clean_row) + " |\n"
+                        text += "\n"
     except Exception as e:
         print(f"Error during standard PDF extraction: {e}")
 

@@ -1,0 +1,966 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+    /* ============================================================
+       COLOR TREE: Light Layer → Mid Layer → Dark Base → Deepest
+       ============================================================ */
+
+    /* Deepest background - true abyss */
+    --bg-base: #050508;
+
+    /* Mid-dark layer - subtle lift */
+    --bg-surface: rgba(12, 12, 18, 0.85);
+    --bg-surface-2: rgba(18, 18, 28, 0.90);
+
+    /* Lighter layer - elevated panels */
+    --bg-elevated: rgba(28, 28, 44, 0.80);
+    --bg-elevated-hover: rgba(38, 38, 58, 0.90);
+
+    /* Accent colors */
+    --primary: #6C63FF;
+    --primary-hover: #5A52E0;
+    --primary-glow: rgba(108, 99, 255, 0.35);
+
+    --accent: #00E5C4;
+    --accent-soft: rgba(0, 229, 196, 0.12);
+
+    --gold: #FFD166;
+
+    --text-main: #EEF0FF;
+    --text-soft: #B8BCD8;
+    --text-muted: #6B6F8E;
+
+    /* Borders - 3-level depth */
+    --border-dark: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-light: rgba(255, 255, 255, 0.14);
+    --border-glow: rgba(108, 99, 255, 0.4);
+    --border-accent: rgba(0, 229, 196, 0.3);
+
+    /* Glass surfaces */
+    --glass-deep: rgba(8, 8, 14, 0.75);
+    --glass-mid: rgba(16, 16, 26, 0.70);
+    --glass-light: rgba(26, 26, 42, 0.65);
+    --glass-shadow: 0 12px 48px 0 rgba(0, 0, 0, 0.6);
+    --glass-border: 1px solid rgba(255, 255, 255, 0.07);
+
+    /* Gradients */
+    --grad-primary: linear-gradient(135deg, #6C63FF 0%, #00E5C4 100%);
+    --grad-warm: linear-gradient(135deg, #6C63FF 0%, #A78BFA 50%, #00E5C4 100%);
+    --grad-deep: linear-gradient(180deg, rgba(108, 99, 255, 0.08) 0%, rgba(0, 229, 196, 0.04) 100%);
+    --grad-subtle: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0) 100%);
+
+    --font-family: 'Outfit', sans-serif;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 20px;
+    --radius-xl: 32px;
+
+    --transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-family);
+    background-color: var(--bg-base);
+    color: var(--text-main);
+    line-height: 1.5;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Ambient glow layers */
+body::before {
+    content: '';
+    position: fixed;
+    top: -15%;
+    left: -8%;
+    width: 55%;
+    height: 55%;
+    background: radial-gradient(ellipse, rgba(108, 99, 255, 0.12) 0%, transparent 65%);
+    pointer-events: none;
+    z-index: -1;
+}
+
+body::after {
+    content: '';
+    position: fixed;
+    bottom: -15%;
+    right: -8%;
+    width: 55%;
+    height: 55%;
+    background: radial-gradient(ellipse, rgba(0, 229, 196, 0.09) 0%, transparent 65%);
+    pointer-events: none;
+    z-index: -1;
+}
+
+/* ============================================================
+   TEXT UTILITIES
+   ============================================================ */
+.text-gradient {
+    background: var(--grad-primary);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    display: inline-block;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+/* ============================================================
+   GLASS PANEL - LAYERED
+   Light glass (elevated) → mid glass → deep glass
+   ============================================================ */
+.glass-panel {
+    background: var(--glass-light);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: var(--glass-border);
+    box-shadow: var(--glass-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-lg);
+}
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 24px;
+    border-radius: var(--radius-md);
+    font-family: var(--font-family);
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: var(--transition);
+    border: none;
+    outline: none;
+}
+
+.btn-primary {
+    background: var(--grad-primary);
+    color: white;
+    box-shadow: 0 4px 20px var(--primary-glow);
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(108, 99, 255, 0.5), 0 2px 8px rgba(0, 229, 196, 0.2);
+    filter: brightness(1.08);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.btn-outline {
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-soft);
+    border: 1px solid var(--border);
+}
+
+.btn-outline:hover {
+    background: rgba(255, 255, 255, 0.07);
+    border-color: var(--border-light);
+    color: var(--text-main);
+}
+
+.btn-icon-only {
+    padding: 10px;
+    border-radius: 50%;
+    transition: var(--transition);
+}
+
+.btn-icon-only:hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+    color: var(--text-main) !important;
+}
+
+/* ============================================================
+   INPUTS
+   ============================================================ */
+.input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.input-label {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+}
+
+.input-field {
+    background: var(--glass-deep);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    font-family: var(--font-family);
+    font-size: 1rem;
+    transition: var(--transition);
+    width: 100%;
+}
+
+.input-field:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+    outline: none;
+    background: rgba(12, 12, 20, 0.9);
+}
+
+.input-field::placeholder {
+    color: var(--text-muted);
+}
+
+/* ============================================================
+   UPLOAD ZONE
+   ============================================================ */
+.upload-zone {
+    border: 1px dashed var(--border-light);
+    border-radius: var(--radius-lg);
+    padding: 60px 20px;
+    text-align: center;
+    transition: var(--transition);
+    background: rgba(255, 255, 255, 0.015);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-top: 10px;
+}
+
+.upload-zone:hover {
+    border-color: rgba(108, 99, 255, 0.4);
+    background: rgba(108, 99, 255, 0.04);
+}
+
+.upload-zone.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    transform: scale(1.02);
+    box-shadow: 0 0 30px rgba(0, 229, 196, 0.15);
+}
+
+/* ============================================================
+   SOURCE BADGES
+   ============================================================ */
+.source-badges-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 30px;
+}
+
+.source-badge {
+    background: var(--glass-deep);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    padding: 10px 20px;
+    color: var(--text-soft);
+    font-size: 0.95rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.source-badge:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border-light);
+    color: var(--text-main);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.source-badge input {
+    display: none;
+}
+
+/* ============================================================
+   ANIMATIONS
+   ============================================================ */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+}
+
+.animate-pulse-slow {
+    animation: pulse 3s infinite alternate;
+}
+
+@keyframes pulse {
+    from {
+        opacity: 0.6;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: -1000px 0;
+    }
+
+    100% {
+        background-position: 1000px 0;
+    }
+}
+
+.skeleton-line {
+    animation: shimmer 2s infinite linear;
+    background: linear-gradient(to right,
+            rgba(108, 99, 255, 0.04) 4%,
+            rgba(108, 99, 255, 0.12) 25%,
+            rgba(108, 99, 255, 0.04) 36%);
+    background-size: 1000px 100%;
+}
+
+@keyframes borderRotate {
+    100% {
+        transform: rotate(1turn);
+    }
+}
+
+.animated-border-zone::before {
+    content: '';
+    position: absolute;
+    z-index: 0;
+    width: 200%;
+    height: 200%;
+    background: conic-gradient(transparent, transparent, transparent, var(--primary));
+    top: -50%;
+    left: -50%;
+    animation: borderRotate 3s linear infinite;
+}
+
+.animated-border-zone::after {
+    content: '';
+    position: absolute;
+    z-index: 0;
+    left: 3px;
+    top: 3px;
+    width: calc(100% - 6px);
+    height: calc(100% - 6px);
+    background: var(--glass-mid);
+    border-radius: calc(var(--radius-lg) - 3px);
+}
+
+@keyframes spin-slow {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.spin-slow {
+    animation: spin-slow 2s linear infinite;
+}
+
+/* ============================================================
+   SCROLLBAR
+   ============================================================ */
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(108, 99, 255, 0.2);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(108, 99, 255, 0.4);
+}
+
+/* ============================================================
+   AUTH
+   ============================================================ */
+.auth-page {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 440px;
+    padding: 44px;
+    /* Elevated layer - lighter than base */
+    background: linear-gradient(145deg, var(--glass-light) 0%, var(--glass-mid) 100%);
+    border: 1px solid var(--border-light);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(108, 99, 255, 0.1);
+}
+
+.auth-header {
+    text-align: center;
+    margin-bottom: 32px;
+}
+
+.auth-logo {
+    font-size: 2.5rem;
+    margin-bottom: 8px;
+}
+
+/* ============================================================
+   DASHBOARD LAYOUT
+   ============================================================ */
+.dashboard-layout {
+    display: flex;
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* Sidebar - LIGHTEST layer (most visible, closest to user) */
+.sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    /* Lighter than main bg to create depth */
+    background: linear-gradient(180deg,
+            rgba(18, 18, 30, 0.95) 0%,
+            rgba(14, 14, 22, 0.98) 100%);
+    backdrop-filter: blur(20px);
+    transition: var(--transition);
+}
+
+.sidebar-header {
+    padding: 24px;
+    border-bottom: 1px solid var(--border-dark);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+
+.sidebar-footer {
+    padding: 20px;
+    border-top: 1px solid var(--border-dark);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/* Main content - MID layer */
+.main-content {
+    flex: 1;
+    overflow: hidden;
+    padding: 28px 40px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    background: linear-gradient(175deg,
+            rgba(10, 8, 20, 0.4) 0%,
+            transparent 40%);
+}
+
+/* ============================================================
+   HISTORY ITEMS - 3-level depth
+   ============================================================ */
+.history-item {
+    padding: 11px 14px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: var(--transition);
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.01);
+}
+
+.history-item:hover {
+    background: rgba(108, 99, 255, 0.07);
+    border-color: rgba(108, 99, 255, 0.2);
+    transform: translateX(2px);
+}
+
+.history-item.active {
+    background: rgba(108, 99, 255, 0.14);
+    border-color: rgba(108, 99, 255, 0.35);
+    box-shadow: 0 2px 12px rgba(108, 99, 255, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.history-title {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-soft);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color 0.2s;
+}
+
+.history-item:hover .history-title,
+.history-item.active .history-title {
+    color: var(--text-main);
+}
+
+.history-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-item.active .history-meta {
+    color: rgba(108, 99, 255, 0.8);
+}
+
+/* ============================================================
+   CHAT - DEEP layer
+   ============================================================ */
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    max-width: 100%;
+    width: 100%;
+    margin: 0 auto;
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-bottom: 24px;
+}
+
+.message {
+    display: flex;
+    gap: 14px;
+    width: 100%;
+}
+
+.message.user {
+    align-self: flex-end;
+    flex-direction: row-reverse;
+    max-width: 82%;
+    margin-left: auto;
+}
+
+.message.ai {
+    max-width: 100%;
+}
+
+.message-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 1.1rem;
+    /* Mid-dark layer for avatar */
+    background: var(--glass-mid);
+    border: 1px solid var(--border);
+}
+
+.message.ai .message-avatar {
+    background: var(--grad-primary);
+    border: none;
+    color: white;
+    box-shadow: 0 4px 12px var(--primary-glow);
+}
+
+/* Message content - varies by role */
+.message-content {
+    /* Mid surface */
+    background: var(--glass-mid);
+    padding: 16px 20px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    font-size: 1rem;
+    color: var(--text-soft);
+}
+
+.message.user .message-content {
+    /* Slightly lighter for user bubbles */
+    background: rgba(108, 99, 255, 0.12);
+    border-color: rgba(108, 99, 255, 0.3);
+    color: var(--text-main);
+}
+
+.chat-input {
+    width: 100%;
+    /* Deep layer input */
+    background: var(--glass-deep);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    padding: 16px 60px 16px 24px;
+    color: var(--text-main);
+    font-family: var(--font-family);
+    font-size: 1rem;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    transition: var(--transition);
+}
+
+.chat-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 4px 30px rgba(108, 99, 255, 0.25), 0 0 0 1px var(--primary-glow);
+    background: rgba(8, 8, 16, 0.95);
+}
+
+.chat-input::placeholder {
+    color: var(--text-muted);
+}
+
+.chat-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.chat-submitBtn {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--grad-primary);
+    color: white;
+    border: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: var(--transition);
+    box-shadow: 0 2px 12px var(--primary-glow);
+}
+
+.chat-submitBtn:hover {
+    transform: translateY(-50%) scale(1.1);
+    box-shadow: 0 4px 20px rgba(108, 99, 255, 0.5);
+}
+
+.chat-submitBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: translateY(-50%);
+}
+
+/* ============================================================
+   OUTPUT OPTIONS
+   ============================================================ */
+.output-options {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 20px 0;
+}
+
+.output-option {
+    padding: 8px 18px;
+    background: var(--glass-deep);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    cursor: pointer;
+    transition: var(--transition);
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.output-option:hover {
+    background: var(--glass-mid);
+    border-color: var(--border-light);
+    color: var(--text-soft);
+}
+
+.output-option.selected {
+    background: rgba(108, 99, 255, 0.18);
+    border-color: var(--primary);
+    color: #A5AFFF;
+    box-shadow: 0 0 12px rgba(108, 99, 255, 0.2);
+}
+
+/* ============================================================
+   MARKDOWN
+   ============================================================ */
+.markdown-wrapper {
+    color: var(--text-soft);
+}
+
+.markdown-wrapper h1,
+.markdown-wrapper h2,
+.markdown-wrapper h3,
+.markdown-wrapper h4 {
+    margin-top: 24px;
+    margin-bottom: 16px;
+    color: var(--text-main);
+}
+
+.markdown-wrapper p {
+    margin-bottom: 16px;
+}
+
+.markdown-wrapper ul,
+.markdown-wrapper ol {
+    padding-left: 24px;
+    margin-bottom: 16px;
+}
+
+.markdown-wrapper li {
+    margin-bottom: 8px;
+}
+
+.markdown-wrapper code {
+    /* Deepest layer for inline code */
+    background: rgba(0, 0, 0, 0.5);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.9em;
+    color: var(--accent);
+    border: 1px solid var(--border);
+}
+
+.markdown-wrapper pre {
+    /* Absolute deepest for code blocks */
+    background: rgba(4, 4, 10, 0.95);
+    padding: 18px;
+    border-radius: 10px;
+    overflow-x: auto;
+    margin-bottom: 16px;
+    border: 1px solid rgba(108, 99, 255, 0.15);
+    box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+.markdown-wrapper pre code {
+    background: transparent;
+    padding: 0;
+    border: none;
+    color: #cce8e0;
+}
+
+.markdown-wrapper blockquote {
+    border-left: 3px solid var(--primary);
+    padding-left: 16px;
+    margin-left: 0;
+    color: var(--text-muted);
+    font-style: italic;
+    background: rgba(108, 99, 255, 0.04);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+}
+
+/* ============================================================
+   STUDIO BUTTONS - elevated layer
+   ============================================================ */
+.studio-btn:hover {
+    background: rgba(108, 99, 255, 0.10) !important;
+    border-color: rgba(108, 99, 255, 0.3) !important;
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3), 0 0 12px rgba(108, 99, 255, 0.1) !important;
+}
+
+.studio-btn:hover span,
+.studio-btn:hover div {
+    color: var(--text-main) !important;
+}
+
+/* ============================================================
+   RESIZE HANDLE
+   ============================================================ */
+.resize-handle {
+    width: 5px;
+    background: transparent;
+    cursor: col-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+    z-index: 10;
+    margin: 0 -2.5px;
+    border-radius: 4px;
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+    background: linear-gradient(180deg, var(--primary) 0%, var(--accent) 100%);
+    opacity: 0.6;
+}
+
+/* ============================================================
+   FOCUS RING (for text input row)
+   ============================================================ */
+.focus-within-ring:focus-within {
+    border-color: rgba(108, 99, 255, 0.4) !important;
+    box-shadow: 0 0 0 2px rgba(108, 99, 255, 0.1) !important;
+}
+
+/* ============================================================
+   MOBILE VIEW & TABS
+   ============================================================ */
+.mobile-header-area {
+    display: none;
+    flex-direction: column;
+    background: var(--glass-deep);
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+    z-index: 50;
+}
+
+.mobile-unified-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+}
+
+.mobile-tabs {
+    display: flex;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.mobile-tab-btn {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    font-weight: 500;
+    padding: 12px 0;
+    cursor: pointer;
+    position: relative;
+    font-family: var(--font-family);
+    transition: color 0.2s;
+}
+
+.mobile-tab-btn.active {
+    color: var(--text-main);
+}
+
+.mobile-tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 20%;
+    right: 20%;
+    height: 3px;
+    background: var(--grad-primary);
+    border-radius: 3px 3px 0 0;
+}
+
+@media (max-width: 900px) {
+    .dashboard-layout {
+        flex-direction: column !important;
+        overflow-y: auto !important;
+    }
+    
+    .mobile-header-area {
+        display: flex;
+    }
+
+    /* Hide desktop headers */
+    .desktop-header {
+        display: none !important;
+    }
+
+    /* Sidebars take full width and hide borders */
+    .sidebar {
+        width: 100% !important;
+        border-right: none;
+        flex: 1;
+        display: none; /* hidden by default on mobile */
+    }
+    
+    .main-content {
+        display: none; /* hidden by default on mobile */
+        width: 100%;
+        padding: 16px;
+        flex: 1;
+    }
+
+    .resize-handle {
+        display: none !important;
+    }
+
+    /* Handle mobile tab switching via parent class */
+    .app-wrapper.mobile-tab-history .history-sidebar {
+        display: flex !important;
+    }
+    
+    .app-wrapper.mobile-tab-chat .main-content {
+        display: flex !important;
+    }
+
+    .app-wrapper.mobile-tab-studio .studio-sidebar {
+        display: flex !important;
+    }
+}
+
+
+@media (max-width: 768px) {
+    .auth-page {
+        padding: 16px;
+    }
+    .auth-card {
+        padding: 32px 24px;
+        border-radius: 16px;
+    }
+}
+

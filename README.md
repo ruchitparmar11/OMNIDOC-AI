@@ -1,104 +1,91 @@
-# OMNIDOC AI+ Multimodal Assistant
+# OMNIDOC AI — Intelligent Document Intelligence Platform
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 🎯 Overview
-OMNIDOC AI+ is an intelligent document analysis tool that processes multiple file formats and enables natural language Q&A interactions using the Gemini 2.0 pro API. Upload any supported file and get detailed descriptions and insights through an intuitive interface.
+OMNIDOC AI is a full-stack AI document intelligence platform. Upload PDFs, code, spreadsheets, images or paste a URL — get AI summaries, hybrid RAG-powered chat, and Studio content (slides, quizzes, flashcards, mind maps, and more).
 
 ## ✨ Key Features
-- **Multiple Format Support**
-  - Text files (.txt)
-  - PDF documents
-  - Microsoft Word (.docx)
-  - Images (png, jpg, jpeg)
-  - Source code files
+- **Hybrid RAG Engine** — Dense (Qdrant) + Sparse (BM25) retrieval + cross-encoder reranking
+- **Multi-Document Chat** — Ask questions across multiple documents at once
+- **Studio** — Generate Audio Scripts, Slide Decks, Mind Maps, Quizzes, Flashcards, Infographics, Reports, Data Tables
+- **Document History** — Auto-saved sessions with rename & folder organisation
+- **Shareable Links** — Share any analysis via a public URL
+- **Premium Tier** — Stripe-powered subscription with unlimited analyses
+- **JWT Auth** — Secure bcrypt password hashing + JWT-protected admin routes
+- **Responsive UI** — React + Framer Motion landing page + app dashboard
 
-- **Smart Processing**
-  - Automatic content extraction
-  - AI-powered descriptions
-  - Interactive Q&A system
-- **User-Friendly Interface**
-  - Built with Streamlit
-  - Simple upload mechanism
-  - Real-time processing
+## 🛠️ Tech Stack
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 18, Vite, Framer Motion |
+| Backend | Python, Flask, SQLite |
+| Vector DB | Qdrant (persistent, local) |
+| AI | OpenRouter (GPT-4o-mini) |
+| Embeddings | sentence-transformers (MiniLM-L6) |
+| Auth | bcrypt + JWT |
+| Payments | Stripe Checkout |
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8 or higher
-- Gemini API key
-- Git
+- Python 3.9+
+- Node.js 18+
+- OpenRouter API key
 
-### Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/ruchitparmar11/omnidoc-ai.git
-   cd omnidoc-ai+
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Configure API key:
-   ```bash
-   # Windows
-   set GEMINI_API_KEY=your_api_key_here
-
-   # Linux/MacOS
-   export GEMINI_API_KEY=your_api_key_here
-   ```
-
-### Usage
-1. Start the application:
-   ```bash
-   streamlit run main.py
-   ```
-2. Open your browser at `http://localhost:8501`
-3. Upload a file or paste content
-4. Get AI-generated descriptions
-5. Ask questions about the content
-
-## 🛠️ Technical Architecture
-- **Frontend**: Streamlit
-- **AI Engine**: Gemini 2.0 pro
-- **Content Processing**: Custom utilities for each file type
-- **Audio/Video**: Whisper model integration
-
-## 📝 API Reference
-```python
-from omnidoc import process_file
-
-# Basic usage
-result = process_file(file_path)
-description = result.get_description()
+### 1. Clone & Install Backend
+```bash
+git clone https://github.com/ruchitparmar11/OMNIDOC-AI-.git
+cd OMNIDOC-AI-
+pip install -r requirements.txt
 ```
 
-## 🤝 Contributing
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+### 2. Configure Secrets
+```bash
+# .streamlit/secrets.toml
+OPENROUTER_API_KEY = "your_openrouter_key_here"
+```
 
-## ⚠️ Known Limitations
-- Video processing requires initial model download
-- Large files (>100MB) may take longer to process
-- API rate limits apply based on your Gemini API tier
+### 3. Start Backend
+```bash
+python api.py
+# Flask runs on http://localhost:5000
+```
+
+### 4. Install & Start Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+# React runs on http://localhost:5173
+```
+
+### 5. Open the App
+Visit `http://localhost:5173` — register an account (username `admin` gets admin privileges).
+
+## 📁 Project Structure
+```
+OMNIDOC/
+├── api.py              # Flask REST API
+├── utils/              # PDF, DOCX, image, code extractors
+├── qdrant_db/          # Persistent vector store
+├── users.db            # SQLite user + history database
+└── frontend/
+    ├── src/
+    │   ├── App.jsx         # Main dashboard
+    │   ├── LandingPage.jsx # Marketing landing page
+    │   ├── AdminPanel.jsx  # Admin dashboard
+    │   └── SharedDocument.jsx
+    └── .env            # VITE_API_BASE
+```
+
+## ⚠️ File Size Limit
+Maximum upload size: **20 MB** per file.
 
 ## 📄 License
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT License — see `LICENSE` for details.
 
 ## 📞 Support
-- Create an issue for bug reports
-- Join our [Linkedin](www.linkedin.com/in/ruchit-parmar-16562229b)
+- Issues: [GitHub Issues](https://github.com/ruchitparmar11/OMNIDOC-AI-/issues)
+- LinkedIn: [Ruchit Parmar](https://www.linkedin.com/in/ruchit-parmar-16562229b)
 - Email: ruchitparmar78@gmail.com
-
-## 🙏 Acknowledgments
-- Gemini 2.0 pro
-- Streamlit framework
-- OpenAI Whisper
-- All contributors
-
-> _If you know, you know. OMNIDOC AI+ is built for developers who need fast, intelligent document analysis and Q&A—by devs, for devs._

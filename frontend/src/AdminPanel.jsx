@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Users, FileText, ArrowLeft, Star } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000/api';
+const rawApiBase = import.meta.env.VITE_API_BASE || 'http://localhost:5000/api';
+const API_BASE = rawApiBase.endsWith('/api') ? rawApiBase : `${rawApiBase}/api`;
 
 export default function AdminPanel({ onBack }) {
     const [users, setUsers] = useState([]);

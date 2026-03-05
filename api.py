@@ -50,12 +50,13 @@ except Exception as e:
 client = None
 if API_KEY:
     http_client = httpx.Client(timeout=60)
+    FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=API_KEY,
         http_client=http_client,
         default_headers={
-            "HTTP-Referer": "http://localhost:5173",
+            "HTTP-Referer": FRONTEND_URL,
             "X-Title": "OmniDoc AI React",
         }
     )
@@ -859,11 +860,12 @@ def create_checkout_session():
         data = request.json
         user_id = data.get('user_id')
         
+        FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
         # If no stripe key is provided, we simulate the success via direct redirect so the app doesn't break
         if not stripe.api_key:
             return jsonify({
                 "success": True, 
-                "url": f"http://localhost:5173/?success=true&user_id={user_id}"
+                "url": f"{FRONTEND_URL}/?success=true&user_id={user_id}"
             })
 
         session = stripe.checkout.Session.create(
@@ -880,8 +882,8 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='payment',
-            success_url=f"http://localhost:5173/?success=true&user_id={user_id}",
-            cancel_url=f"http://localhost:5173/?canceled=true",
+            success_url=f"{FRONTEND_URL}/?success=true&user_id={user_id}",
+            cancel_url=f"{FRONTEND_URL}/?canceled=true",
         )
         return jsonify({"success": True, "url": session.url})
     except Exception as e:

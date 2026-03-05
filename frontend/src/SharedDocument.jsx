@@ -3,7 +3,7 @@ import axios from 'axios';
 import { FileText, ArrowLeft } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000/api';
 
 export default function SharedDocument({ sharedId, onGoDashboard }) {
     const [data, setData] = useState(null);

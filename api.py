@@ -12,11 +12,7 @@ from functools import wraps
 import time
 import tempfile
 import json
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from qdrant_client import QdrantClient
@@ -100,6 +96,7 @@ reranker = None
 def get_embedder():
     global embedder
     if embedder is None:
+        from sentence_transformers import SentenceTransformer
         # MiniLM is incredibly fast and lightweight for document semantic search
         embedder = SentenceTransformer('all-MiniLM-L6-v2')
     return embedder
@@ -112,22 +109,30 @@ def get_reranker():
         reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
     return reranker
 
-# Initialize Persistent Qdrant Database
-try:
-    q_client = QdrantClient(path="qdrant_db")
-    try:
-        q_client.get_collection("omnidoc_chunks")
-    except Exception:
-        q_client.create_collection(
-            collection_name="omnidoc_chunks",
-            vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-        )
-except Exception as e:
-    print(f"Warning: Failed to init Qdrant ({e})")
-    q_client = None
+q_client = None
+qdrant_initialized = False
+
+def get_q_client():
+    global q_client, qdrant_initialized
+    if not qdrant_initialized:
+        qdrant_initialized = True
+        try:
+            q_client = QdrantClient(path="qdrant_db")
+            try:
+                q_client.get_collection("omnidoc_chunks")
+            except Exception:
+                q_client.create_collection(
+                    collection_name="omnidoc_chunks",
+                    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                )
+        except Exception as e:
+            print(f"Warning: Failed to init Qdrant ({e})")
+            q_client = None
+    return q_client
 
 def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
-    if not q_client:
+    client_q = get_q_client()
+    if not client_q:
         return default_text[:15000] # Fallback
         
     try:
@@ -140,7 +145,7 @@ def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
         
         # 1. DENSE RETRIEVAL (Qdrant Database) - Fetches directly from disk!
         dense_top_k = 15
-        search_result = q_client.search(
+        search_result = client_q.search(
             collection_name="omnidoc_chunks",
             query_vector=question_embedding.tolist(),
             query_filter=Filter(
@@ -161,6 +166,7 @@ def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
         
         # 2. SPARSE RETRIEVAL (BM25) - Done on the candidates
         from rank_bm25 import BM25Okapi
+        import numpy as np
         tokenized_chunks = [chunk.lower().split() for chunk in dense_chunks]
         bm25 = BM25Okapi(tokenized_chunks)
         tokenized_query = question.lower().split()
@@ -270,10 +276,44 @@ def require_admin(f):
         return f(*args, **kwargs)
     return decorated
 
+db_pool = None
+
+def init_db_pool():
+    global db_pool
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        try:
+            db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, db_url)
+            print("Successfully initialized PostgreSQL connection pool.")
+        except Exception as e:
+            print(f"Error initializing connection pool: {e}")
+
+init_db_pool()
+
 def get_db_connection():
-    conn = sqlite3.connect('users.db')
-    
-    return conn
+    if db_pool:
+        try:
+            return db_pool.getconn()
+        except Exception as e:
+            print(f"Error getting connection from pool: {e}")
+    # Fallback to direct connection if pool is exhausted or uninitialized
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        return psycopg2.connect(db_url)
+    raise Exception("DATABASE_URL is not set.")
+
+def release_db_connection(conn):
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+            return
+        except Exception:
+            pass
+    if conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
@@ -618,7 +658,8 @@ def analyze_content():
     entry_id = c.lastrowid
     
     # Store document embeddings directly into Qdrant for persistent RAG querying!
-    if q_client and content:
+    client_q = get_q_client()
+    if client_q and content:
         import uuid
         chunks = chunk_text(content, chunk_size=1500, overlap=300)
         if chunks:
@@ -638,7 +679,7 @@ def analyze_content():
                          }
                      )
                  )
-             q_client.upsert(collection_name="omnidoc_chunks", points=points)
+             client_q.upsert(collection_name="omnidoc_chunks", points=points)
              
     # Increment analysis count
     c.execute("UPDATE users SET analysis_count = analysis_count + 1 WHERE id = ?", (user_id,))
@@ -893,6 +934,7 @@ def check_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    conn.commit()
     release_db_connection(conn)
 
 check_db()

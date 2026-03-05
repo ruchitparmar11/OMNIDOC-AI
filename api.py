@@ -1,5 +1,10 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import psycopg2.pool
+import os
 import hashlib
 import bcrypt
 import jwt
@@ -226,10 +231,10 @@ def generate_chat_stream(messages, history_id, question, chat_history, model="op
         chat_history.append({"role": "ai", "content": full_answer})
         try:
             conn = get_db_connection()
-            c = conn.cursor()
-            c.execute("UPDATE user_history SET answers = ? WHERE id = ?", (json.dumps(chat_history), history_id))
+            c = conn.cursor(cursor_factory=RealDictCursor)
+            c.execute("UPDATE user_history SET answers = %s WHERE id = %s", (json.dumps(chat_history), history_id))
             conn.commit()
-            conn.close()
+            release_db_connection(conn)
         except Exception:
             pass
             
@@ -267,7 +272,7 @@ def require_admin(f):
 
 def get_db_connection():
     conn = sqlite3.connect('users.db')
-    conn.row_factory = sqlite3.Row
+    
     return conn
 
 @app.route('/api/auth/register', methods=['POST'])
@@ -283,15 +288,15 @@ def register():
     is_premium = 1 if role == 'admin' else 0
 
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        c.execute("INSERT INTO users (username, password_hash, role, analysis_count, is_premium) VALUES (?, ?, ?, 0, ?)", 
+        c.execute("INSERT INTO users (username, password_hash, role, analysis_count, is_premium) VALUES (%s, %s, %s, 0, %s) RETURNING id", 
                   (username, hash_password(password), role, is_premium))
         conn.commit()
         
         # Fetch the newly created user
-        user_id = c.lastrowid
-        c.execute("SELECT id, username, role, analysis_count, is_premium FROM users WHERE id = ?", (user_id,))
+        user_id = c.fetchone()["id"]
+        c.execute("SELECT id, username, role, analysis_count, is_premium FROM users WHERE id = %s", (user_id,))
         user = c.fetchone()
         
         token = make_token(user_id, role)
@@ -306,10 +311,10 @@ def register():
                 "is_premium": bool(user['is_premium'])
             }
         })
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return jsonify({"success": False, "message": "Username already exists"}), 409
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -318,12 +323,12 @@ def login():
     password = data.get('password')
     
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = ?", (username,))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = %s", (username,))
     user = c.fetchone()
     if user and not check_password(password, user["password_hash"]):
         user = None
-    conn.close()
+    release_db_connection(conn)
     
     if user:
         token = make_token(user['id'], user['role'])
@@ -343,11 +348,11 @@ def login():
 @app.route('/api/history/<int:user_id>', methods=['GET'])
 def get_user_history(user_id):
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("""SELECT content_type, content, description, questions, answers, created_at, id, file_name, folder_name 
                  FROM user_history WHERE user_id = ? ORDER BY created_at DESC""", (user_id,))
     history = [dict(row) for row in c.fetchall()]
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True, "history": history})
 
 @app.route('/api/history/<int:history_id>/rename', methods=['PATCH'])
@@ -357,19 +362,19 @@ def rename_history(history_id):
     if not new_name:
         return jsonify({"success": False, "message": "Name required"}), 400
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE user_history SET file_name = ? WHERE id = ?", (new_name, history_id))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("UPDATE user_history SET file_name = %s WHERE id = %s", (new_name, history_id))
     conn.commit()
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True})
 
 @app.route('/api/history/<int:history_id>', methods=['DELETE'])
 def delete_history(history_id):
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM user_history WHERE id = ?", (history_id,))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("DELETE FROM user_history WHERE id = %s", (history_id,))
     conn.commit()
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True})
 
 @app.route('/api/analyze', methods=['POST'])
@@ -383,12 +388,12 @@ def analyze_content():
         return jsonify({"success": False, "message": "User ID required"}), 400
 
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT role, analysis_count, is_premium FROM users WHERE id = ?", (user_id,))
     user = c.fetchone()
     
     if not user:
-        conn.close()
+        release_db_connection(conn)
         return jsonify({"success": False, "message": "User not found"}), 404
 
     role = user['role']
@@ -396,7 +401,7 @@ def analyze_content():
     analysis_count = user['analysis_count']
 
     if role != 'admin' and not is_premium and analysis_count >= 4:
-        conn.close()
+        release_db_connection(conn)
         return jsonify({"success": False, "message": "Free tier limit reached. Please upgrade to Premium."}), 403
     
     # Extract history_id correctly without throwing exceptions if it's 'null' string
@@ -411,11 +416,11 @@ def analyze_content():
         # Studio generation on an EXISTING document! 
         # Skip extraction, reuse the content, and append to the existing DB row
         conn = get_db_connection()
-        c = conn.cursor()
+        c = conn.cursor(cursor_factory=RealDictCursor)
         c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = ? AND user_id = ?", (history_id, user_id))
         row = c.fetchone()
         if not row:
-            conn.close()
+            release_db_connection(conn)
             return jsonify({"success": False, "message": "Original document not found"}), 404
             
         content = row['content']
@@ -472,9 +477,9 @@ def analyze_content():
             "content": description
         })
         
-        c.execute("UPDATE user_history SET answers = ? WHERE id = ?", (json.dumps(chat_history), history_id))
+        c.execute("UPDATE user_history SET answers = %s WHERE id = %s", (json.dumps(chat_history), history_id))
         conn.commit()
-        conn.close()
+        release_db_connection(conn)
         
         return jsonify({
             "success": True, 
@@ -607,7 +612,7 @@ def analyze_content():
         answers_str = json.dumps([{"role": "studio", "feature": output_type, "content": description}])
 
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("""INSERT INTO user_history (user_id, content_type, content, description, questions, answers, file_name, folder_name) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
     entry_id = c.lastrowid
@@ -643,7 +648,7 @@ def analyze_content():
     c.execute("SELECT analysis_count FROM users WHERE id = ?", (user_id,))
     updated_count = c.fetchone()['analysis_count']
     
-    conn.close()
+    release_db_connection(conn)
 
     return jsonify({
         "success": True, 
@@ -671,14 +676,14 @@ def chat():
         history_ids = [history_id]
 
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     
     placeholders = ','.join('?' for _ in history_ids)
     c.execute(f"SELECT id, content, answers, content_type FROM user_history WHERE id IN ({placeholders})", tuple(history_ids))
     rows = c.fetchall()
     
     if not rows:
-        conn.close()
+        release_db_connection(conn)
         return jsonify({"success": False, "message": "History not found"}), 404
         
     combined_content = "\n\n--- NEXT DOCUMENT ---\n\n".join([r['content'] for r in rows])
@@ -721,7 +726,7 @@ def chat():
             messages.append({"role": role, "content": content})
         
     messages.append({"role": "user", "content": question})
-    conn.close()
+    release_db_connection(conn)
     
     # Will save the chat stream to the first history_id passed
     return Response(generate_chat_stream(messages, history_ids[0], question, chat_history), mimetype='text/event-stream')
@@ -731,12 +736,12 @@ import uuid
 @app.route('/api/share/<int:history_id>', methods=['POST'])
 def share_history(history_id):
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT shared_id FROM user_history WHERE id = ?", (history_id,))
     row = c.fetchone()
     
     if not row:
-        conn.close()
+        release_db_connection(conn)
         return jsonify({"success": False, "message": "History not found"}), 404
         
     shared_id = row['shared_id']
@@ -745,16 +750,16 @@ def share_history(history_id):
         c.execute("UPDATE user_history SET shared_id = ? WHERE id = ?", (shared_id, history_id))
         conn.commit()
         
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True, "shared_id": shared_id})
 
 @app.route('/api/shared/<shared_id>', methods=['GET'])
 def get_shared_history(shared_id):
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = ?", (shared_id,))
     row = c.fetchone()
-    conn.close()
+    release_db_connection(conn)
     
     if not row:
         return jsonify({"success": False, "message": "Shared document not found"}), 404
@@ -765,20 +770,20 @@ def get_shared_history(shared_id):
 @require_admin
 def admin_users():
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
     users = [dict(r) for r in c.fetchall()]
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True, "users": users})
 
 @app.route('/api/admin/history', methods=['GET'])
 @require_admin
 def admin_history():
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT h.id, h.content_type, h.file_name, h.created_at, u.username as user FROM user_history h JOIN users u ON h.user_id = u.id ORDER BY h.created_at DESC LIMIT 100")
     history = [dict(r) for r in c.fetchall()]
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True, "history": history})
 
 @app.route('/api/admin/export', methods=['GET'])
@@ -786,10 +791,10 @@ def admin_history():
 def admin_export_csv():
     # In a real app, verify admin role here via token/session
     conn = get_db_connection()
-    c = conn.cursor()
+    c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
     users = c.fetchall()
-    conn.close()
+    release_db_connection(conn)
 
     si = io.StringIO()
     cw = csv.writer(si)
@@ -849,12 +854,45 @@ def checkout_success():
     # Normally, this is handled by a Secure Stripe Webhook. 
     # For local testing, we update the DB when the Frontend redirects back.
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE users SET is_premium = 1 WHERE id = ?", (user_id,))
+    c = conn.cursor(cursor_factory=RealDictCursor)
+    c.execute("UPDATE users SET is_premium = 1 WHERE id = %s", (user_id,))
     conn.commit()
-    conn.close()
+    release_db_connection(conn)
     return jsonify({"success": True})
 
 if __name__ == '__main__':
     # Run the Flask app on port 5000
     app.run(host='0.0.0.0', port=5000, debug=True)
+
+
+def check_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            role VARCHAR(50) DEFAULT 'user',
+            analysis_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_premium INTEGER DEFAULT 0
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_history (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id),
+            content_type VARCHAR(50),
+            content TEXT,
+            description TEXT,
+            questions TEXT,
+            answers TEXT,
+            file_name TEXT,
+            folder_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    release_db_connection(conn)
+
+check_db()

@@ -819,9 +819,9 @@ function App() {
 
           <div className="animate-fade-in" style={{ display: 'flex', gap: '24px', flex: 1, minHeight: 0, justifyContent: 'center', width: '100%', maxWidth: '1400px', margin: '0 auto' }}>
             {/* Left Side: Workspace Area */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+            <div className="workspace-area" style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflowY: 'auto' }}>
               {(!documentResults && !isLoadingHistory && activeTab !== 'deepdive') ? (
-                <div style={{ maxWidth: '800px', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', height: '100%' }}>
+                <div style={{ maxWidth: '800px', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column' }}>
                   <div className="glass-panel" style={{ padding: '24px', marginBottom: '16px' }}>
                     <h3 style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}><FileText size={20} /> Upload & Analyze</h3>
 

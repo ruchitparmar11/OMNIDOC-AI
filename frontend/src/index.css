@@ -910,7 +910,7 @@ h5 {
         flex-direction: column !important;
         overflow-y: auto !important;
     }
-    
+
     .mobile-header-area {
         display: flex;
     }
@@ -925,11 +925,14 @@ h5 {
         width: 100% !important;
         border-right: none;
         flex: 1;
-        display: none; /* hidden by default on mobile */
+        display: none;
+        /* hidden by default on mobile */
     }
-    
+
     .main-content {
-        display: none; /* hidden by default on mobile */
+        display: none;
+        /* hidden by default on mobile */
+        flex-direction: column;
         width: 100%;
         padding: 16px;
         flex: 1;
@@ -943,13 +946,27 @@ h5 {
     .app-wrapper.mobile-tab-history .history-sidebar {
         display: flex !important;
     }
-    
-    .app-wrapper.mobile-tab-chat .main-content {
+
+    .app-wrapper.mobile-tab-chat .main-content,
+    .app-wrapper.mobile-tab-studio .main-content {
         display: flex !important;
+    }
+
+    .app-wrapper.mobile-tab-chat .studio-sidebar {
+        display: none !important;
+    }
+
+    .app-wrapper.mobile-tab-chat .workspace-area {
+        display: flex !important;
+    }
+
+    .app-wrapper.mobile-tab-studio .workspace-area {
+        display: none !important;
     }
 
     .app-wrapper.mobile-tab-studio .studio-sidebar {
         display: flex !important;
+        width: 100% !important;
     }
 }
 
@@ -958,9 +975,9 @@ h5 {
     .auth-page {
         padding: 16px;
     }
+
     .auth-card {
         padding: 32px 24px;
         border-radius: 16px;
     }
 }
-

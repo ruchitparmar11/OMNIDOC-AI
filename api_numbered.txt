@@ -1,0 +1,943 @@
+001: from dotenv import load_dotenv
+002: load_dotenv()
+003: import os
+004: import psycopg2
+005: from psycopg2.extras import RealDictCursor
+006: import psycopg2.pool
+007: import os
+008: import hashlib
+009: import bcrypt
+010: import jwt
+011: from functools import wraps
+012: import time
+013: import tempfile
+014: import json
+015: 
+016: from flask import Flask, request, jsonify, Response
+017: from flask_cors import CORS
+018: from qdrant_client import QdrantClient
+019: from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
+020: import csv
+021: import io
+022: import stripe
+023: from openai import OpenAI
+024: import httpx
+025: import concurrent.futures
+026: import requests
+027: from bs4 import BeautifulSoup
+028: 
+029: # Extractors (assuming these exist from main.py)
+030: from utils.extract_pdf import extract_text_from_pdf
+031: from utils.extract_word import extract_text_from_word
+032: from utils.extract_image import extract_text_from_image
+033: from utils.extract_code import extract_text_from_code
+034: 
+035: app = Flask(__name__)
+036: # Enable CORS for the frontend React application running on port 5173
+037: CORS(app, resources={r"/api/*": {"origins": "*"}})
+038: 
+039: # Simple parser for secrets.toml
+040: API_KEY = None
+041: try:
+042:     with open(".streamlit/secrets.toml", "r") as f:
+043:         for line in f:
+044:             if "OPENROUTER_API_KEY" in line:
+045:                 API_KEY = line.split("=")[1].strip().strip('"').strip("'")
+046:                 break
+047: except Exception as e:
+048:     # If not found in file, try to grab from the system's environment variables (e.g. Render/Vercel)
+049:     API_KEY = os.environ.get("OPENROUTER_API_KEY")
+050:     if not API_KEY:
+051:         print(f"Failed to load OpenRouter API key from secrets or environment.")
+052: 
+053: client = None
+054: if API_KEY:
+055:     http_client = httpx.Client(timeout=60)
+056:     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+057:     client = OpenAI(
+058:         base_url="https://openrouter.ai/api/v1",
+059:         api_key=API_KEY,
+060:         http_client=http_client,
+061:         default_headers={
+062:             "HTTP-Referer": FRONTEND_URL,
+063:             "X-Title": "OmniDoc AI React",
+064:         }
+065:     )
+066: 
+067: def generate_with_retry(prompt, system_prompt="You are OmniDoc AI, an expert document assistant. Provide the most critical highlights.", model="openai/gpt-4o-mini", max_retries=3):
+068:     if not client:
+069:         return "Warning: AI API not initialized. The prompt was: " + prompt[:100] + "..."
+070:     for attempt in range(max_retries):
+071:         try:
+072:             response = client.chat.completions.create(
+073:                 model=model,
+074:                 messages=[
+075:                     {"role": "system", "content": system_prompt},
+076:                     {"role": "user", "content": prompt}
+077:                 ],
+078:                 temperature=0.3
+079:             )
+080:             return response.choices[0].message.content
+081:         except Exception as e:
+082:             time.sleep(1)
+083:             if attempt == max_retries - 1:
+084:                 return f"Error: Failed to generate response ({e})"
+085: 
+086: def chunk_text(text, chunk_size=2000, overlap=300):
+087:     chunks = []
+088:     start = 0
+089:     text_len = len(text)
+090:     while start < text_len:
+091:         end = min(start + chunk_size, text_len)
+092:         chunks.append(text[start:end])
+093:         start += (chunk_size - overlap)
+094:     return chunks
+095: 
+096: # Lazy load our neural embedding model
+097: embedder = None
+098: reranker = None
+099: 
+100: def get_embedder():
+101:     global embedder
+102:     if embedder is None:
+103:         from sentence_transformers import SentenceTransformer
+104:         # MiniLM is incredibly fast and lightweight for document semantic search
+105:         embedder = SentenceTransformer('all-MiniLM-L6-v2')
+106:     return embedder
+107: 
+108: def get_reranker():
+109:     global reranker
+110:     if reranker is None:
+111:         from sentence_transformers import CrossEncoder
+112:         # A lightweight cross-encoder for extremely accurate reranking
+113:         reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+114:     return reranker
+115: 
+116: q_client = None
+117: qdrant_initialized = False
+118: 
+119: def get_q_client():
+120:     global q_client, qdrant_initialized
+121:     if not qdrant_initialized:
+122:         qdrant_initialized = True
+123:         try:
+124:             q_client = QdrantClient(path="qdrant_db")
+125:             try:
+126:                 q_client.get_collection("omnidoc_chunks")
+127:             except Exception:
+128:                 q_client.create_collection(
+129:                     collection_name="omnidoc_chunks",
+130:                     vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+131:                 )
+132:         except Exception as e:
+133:             print(f"Warning: Failed to init Qdrant ({e})")
+134:             q_client = None
+135:     return q_client
+136: 
+137: def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
+138:     client_q = get_q_client()
+139:     if not client_q:
+140:         return default_text[:15000] # Fallback
+141:         
+142:     try:
+143:         # We can pass one or multiple history_ids for Multi-Document Search
+144:         if isinstance(history_ids, int):
+145:             history_ids = [history_ids]
+146:             
+147:         model = get_embedder()
+148:         question_embedding = model.encode([question], convert_to_numpy=True)[0]
+149:         
+150:         # 1. DENSE RETRIEVAL (Qdrant Database) - Fetches directly from disk!
+151:         dense_top_k = 15
+152:         search_result = client_q.search(
+153:             collection_name="omnidoc_chunks",
+154:             query_vector=question_embedding.tolist(),
+155:             query_filter=Filter(
+156:                 must=[
+157:                     FieldCondition(
+158:                         key="history_id",
+159:                         match=MatchAny(any=history_ids)
+160:                     )
+161:                 ]
+162:             ),
+163:             limit=dense_top_k
+164:         )
+165:         
+166:         if not search_result:
+167:              return default_text[:15000]
+168:              
+169:         dense_chunks = [hit.payload['text'] for hit in search_result]
+170:         
+171:         # 2. SPARSE RETRIEVAL (BM25) - Done on the candidates
+172:         from rank_bm25 import BM25Okapi
+173:         import numpy as np
+174:         tokenized_chunks = [chunk.lower().split() for chunk in dense_chunks]
+175:         bm25 = BM25Okapi(tokenized_chunks)
+176:         tokenized_query = question.lower().split()
+177:         bm25_scores = bm25.get_scores(tokenized_query)
+178:         sparse_indices = np.argsort(bm25_scores)[::-1].tolist()
+179:         
+180:         # 3. RECIPROCAL RANK FUSION (RRF)
+181:         rrf_scores = {}
+182:         rrf_k = 60
+183:         
+184:         for rank, hit in enumerate(search_result):
+185:             # idx tracking within candidate list
+186:             rrf_scores[rank] = rrf_scores.get(rank, 0) + 1 / (rrf_k + rank + 1)
+187:             
+188:         for rank, idx in enumerate(sparse_indices):
+189:             rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (rrf_k + rank + 1)
+190:             
+191:         hybrid_indices = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+192:         
+193:         # 4. RERANKING (Cross-Encoder)
+194:         rerank_model = get_reranker()
+195:         cross_inp = [[question, dense_chunks[i]] for i in hybrid_indices]
+196:         cross_scores = rerank_model.predict(cross_inp)
+197:         
+198:         reranked_pairs = sorted(zip(hybrid_indices, cross_scores), key=lambda x: x[1], reverse=True)
+199:         final_top_indices = [pair[0] for pair in reranked_pairs[:top_k]]
+200:         
+201:         # Sort by chunk_index to keep chronlogical order from the document
+202:         final_top_hits = [search_result[i] for i in final_top_indices]
+203:         final_top_hits.sort(key=lambda hit: hit.payload.get('chunk_index', 0))
+204:         
+205:         relevant_context = "\n\n...[SNIP]...\n\n".join([hit.payload['text'] for hit in final_top_hits])
+206:         return relevant_context
+207:     except Exception as e:
+208:         print(f"Advanced RAG Pipeline Error: {e}")
+209:         return default_text[:15000]
+210: 
+211: def generate_chat_stream(messages, history_id, question, chat_history, model="openai/gpt-4o-mini", max_retries=3):
+212:     full_answer = ""
+213:     if not client:
+214:         yield f"data: {json.dumps({'content': 'Warning: AI API not initialized.'})}\n\n"
+215:         yield "data: [DONE]\n\n"
+216:         return
+217:         
+218:     for attempt in range(max_retries):
+219:         try:
+220:             response = client.chat.completions.create(
+221:                 model=model,
+222:                 messages=messages,
+223:                 temperature=0.3,
+224:                 stream=True
+225:             )
+226:             for chunk in response:
+227:                 if chunk.choices[0].delta.content is not None:
+228:                     content = chunk.choices[0].delta.content
+229:                     full_answer += content
+230:                     yield f"data: {json.dumps({'content': content})}\n\n"
+231:             break
+232:         except Exception as e:
+233:             time.sleep(1)
+234:             if attempt == max_retries - 1:
+235:                 yield f"data: {json.dumps({'content': f'Error streaming ({e})'})}\n\n"
+236:                 yield "data: [DONE]\n\n"
+237:                 return
+238:                 
+239:     if full_answer:
+240:         chat_history.append({"role": "user", "content": question})
+241:         chat_history.append({"role": "ai", "content": full_answer})
+242:         try:
+243:             conn = get_db_connection()
+244:             c = conn.cursor(cursor_factory=RealDictCursor)
+245:             c.execute("UPDATE user_history SET answers = %s WHERE id = %s", (json.dumps(chat_history), history_id))
+246:             conn.commit()
+247:             release_db_connection(conn)
+248:         except Exception:
+249:             pass
+250:             
+251:     yield "data: [DONE]\n\n"
+252: 
+253: def hash_password(password):
+254:     """Hash a password with bcrypt (new accounts)."""
+255:     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+256: 
+257: def check_password(password, stored_hash):
+258:     """Verify bcrypt or fallback sha256 hashes."""
+259:     try:
+260:         return bcrypt.checkpw(password.encode(), stored_hash.encode())
+261:     except Exception:
+262:         import hashlib
+263:         return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+264: 
+265: JWT_SECRET = os.environ.get("JWT_SECRET", "omnidoc-supersecret-dev-key-2026")
+266: 
+267: def make_token(user_id, role):
+268:     return jwt.encode({"user_id": user_id, "role": role}, JWT_SECRET, algorithm="HS256")
+269: 
+270: def require_admin(f):
+271:     @wraps(f)
+272:     def decorated(*args, **kwargs):
+273:         token = request.headers.get("Authorization", "").replace("Bearer ", "")
+274:         try:
+275:             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+276:             if payload.get("role") != "admin":
+277:                 return jsonify({"success": False, "message": "Admin access required"}), 403
+278:         except Exception:
+279:             return jsonify({"success": False, "message": "Invalid or missing token"}), 401
+280:         return f(*args, **kwargs)
+281:     return decorated
+282: 
+283: db_pool = None
+284: 
+285: def init_db_pool():
+286:     global db_pool
+287:     db_url = os.environ.get("DATABASE_URL")
+288:     if db_url:
+289:         try:
+290:             db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, db_url)
+291:             print("Successfully initialized PostgreSQL connection pool.")
+292:         except Exception as e:
+293:             print(f"Error initializing connection pool: {e}")
+294: 
+295: init_db_pool()
+296: 
+297: def get_db_connection():
+298:     if db_pool:
+299:         try:
+300:             return db_pool.getconn()
+301:         except Exception as e:
+302:             print(f"Error getting connection from pool: {e}")
+303:     # Fallback to direct connection if pool is exhausted or uninitialized
+304:     db_url = os.environ.get("DATABASE_URL")
+305:     if db_url:
+306:         return psycopg2.connect(db_url)
+307:     raise Exception("DATABASE_URL is not set.")
+308: 
+309: def release_db_connection(conn):
+310:     if db_pool and conn:
+311:         try:
+312:             db_pool.putconn(conn)
+313:             return
+314:         except Exception:
+315:             pass
+316:     if conn:
+317:         try:
+318:             conn.close()
+319:         except Exception:
+320:             pass
+321: 
+322: @app.route('/api/auth/register', methods=['POST'])
+323: def register():
+324:     data = request.json
+325:     username = data.get('username')
+326:     password = data.get('password')
+327:     
+328:     if not username or not password:
+329:         return jsonify({"success": False, "message": "Username and password required"}), 400
+330:         
+331:     role = 'admin' if username.lower() == 'admin' else 'user'
+332:     is_premium = 1 if role == 'admin' else 0
+333: 
+334:     conn = get_db_connection()
+335:     c = conn.cursor(cursor_factory=RealDictCursor)
+336:     try:
+337:         c.execute("INSERT INTO users (username, password_hash, role, analysis_count, is_premium) VALUES (%s, %s, %s, 0, %s) RETURNING id", 
+338:                   (username, hash_password(password), role, is_premium))
+339:         conn.commit()
+340:         
+341:         # Fetch the newly created user
+342:         user_id = c.fetchone()["id"]
+343:         c.execute("SELECT id, username, role, analysis_count, is_premium FROM users WHERE id = %s", (user_id,))
+344:         user = c.fetchone()
+345:         
+346:         token = make_token(user_id, role)
+347:         return jsonify({
+348:             "success": True,
+349:             "token": token,
+350:             "user": {
+351:                 "id": user['id'],
+352:                 "username": user['username'],
+353:                 "role": user['role'],
+354:                 "analysis_count": user['analysis_count'],
+355:                 "is_premium": bool(user['is_premium'])
+356:             }
+357:         })
+358:     except psycopg2.IntegrityError:
+359:         return jsonify({"success": False, "message": "Username already exists"}), 409
+360:     finally:
+361:         release_db_connection(conn)
+362: 
+363: @app.route('/api/auth/login', methods=['POST'])
+364: def login():
+365:     data = request.json
+366:     username = data.get('username')
+367:     password = data.get('password')
+368:     
+369:     conn = get_db_connection()
+370:     c = conn.cursor(cursor_factory=RealDictCursor)
+371:     c.execute("SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = %s", (username,))
+372:     user = c.fetchone()
+373:     if user and not check_password(password, user["password_hash"]):
+374:         user = None
+375:     release_db_connection(conn)
+376:     
+377:     if user:
+378:         token = make_token(user['id'], user['role'])
+379:         return jsonify({
+380:             "success": True,
+381:             "token": token,
+382:             "user": {
+383:                 "id": user['id'],
+384:                 "username": user['username'],
+385:                 "role": user['role'],
+386:                 "analysis_count": user['analysis_count'],
+387:                 "is_premium": bool(user['is_premium'])
+388:             }
+389:         })
+390:     return jsonify({"success": False, "message": "Invalid username or password"}), 401
+391: 
+392: @app.route('/api/history/<int:user_id>', methods=['GET'])
+393: def get_user_history(user_id):
+394:     conn = get_db_connection()
+395:     c = conn.cursor(cursor_factory=RealDictCursor)
+396:     c.execute("""SELECT content_type, content, description, questions, answers, created_at, id, file_name, folder_name 
+397:                  FROM user_history WHERE user_id = %s ORDER BY created_at DESC""", (user_id,))
+398:     history = [dict(row) for row in c.fetchall()]
+399:     release_db_connection(conn)
+400:     return jsonify({"success": True, "history": history})
+401: 
+402: @app.route('/api/history/<int:history_id>/rename', methods=['PATCH'])
+403: def rename_history(history_id):
+404:     data = request.json
+405:     new_name = data.get('name', '').strip()
+406:     if not new_name:
+407:         return jsonify({"success": False, "message": "Name required"}), 400
+408:     conn = get_db_connection()
+409:     c = conn.cursor(cursor_factory=RealDictCursor)
+410:     c.execute("UPDATE user_history SET file_name = %s WHERE id = %s", (new_name, history_id))
+411:     conn.commit()
+412:     release_db_connection(conn)
+413:     return jsonify({"success": True})
+414: 
+415: @app.route('/api/history/<int:history_id>', methods=['DELETE'])
+416: def delete_history(history_id):
+417:     conn = get_db_connection()
+418:     c = conn.cursor(cursor_factory=RealDictCursor)
+419:     c.execute("DELETE FROM user_history WHERE id = %s", (history_id,))
+420:     conn.commit()
+421:     release_db_connection(conn)
+422:     return jsonify({"success": True})
+423: 
+424: @app.route('/api/analyze', methods=['POST'])
+425: def analyze_content():
+426:     user_id = request.form.get('user_id')
+427:     output_type = request.form.get('output_type', 'Summary')
+428:     text_input = request.form.get('text', '')
+429:     folder_name = request.form.get('folder_name', 'Recent')
+430: 
+431:     if not user_id:
+432:         return jsonify({"success": False, "message": "User ID required"}), 400
+433: 
+434:     conn = get_db_connection()
+435:     c = conn.cursor(cursor_factory=RealDictCursor)
+436:     c.execute("SELECT role, analysis_count, is_premium FROM users WHERE id = %s", (user_id,))
+437:     user = c.fetchone()
+438:     
+439:     if not user:
+440:         release_db_connection(conn)
+441:         return jsonify({"success": False, "message": "User not found"}), 404
+442: 
+443:     role = user['role']
+444:     is_premium = bool(user['is_premium'])
+445:     analysis_count = user['analysis_count']
+446: 
+447:     if role != 'admin' and not is_premium and analysis_count >= 4:
+448:         release_db_connection(conn)
+449:         return jsonify({"success": False, "message": "Free tier limit reached. Please upgrade to Premium."}), 403
+450:     
+451:     # Extract history_id correctly without throwing exceptions if it's 'null' string
+452:     history_id = None
+453:     if request.form.get('history_id') and str(request.form.get('history_id')).strip() != 'null':
+454:         try:
+455:             history_id = int(request.form.get('history_id'))
+456:         except:
+457:             history_id = None
+458: 
+459:     if history_id and output_type != "Summary":
+460:         # Studio generation on an EXISTING document! 
+461:         # Skip extraction, reuse the content, and append to the existing DB row
+462:         # (We already have an active conn)
+463:         c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = %s AND user_id = %s", (history_id, user_id))
+464:         row = c.fetchone()
+465:         if not row:
+466:             release_db_connection(conn)
+467:             return jsonify({"success": False, "message": "Original document not found"}), 404
+468:             
+469:         content = row['content']
+470:         answers_str = row['answers']
+471:         file_name = row['file_name']
+472:         content_type = row['content_type']
+473:         
+474:         # Determine persona
+475:         persona = "You are OmniDoc AI, an expert document assistant. Provide the most critical highlights."
+476:         if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+477:             persona = "You are a Senior Principal Software Engineer. Analyze the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+478:         elif content_type == 'csv':
+479:             persona = "You are an Elite Data Scientist and Data Analyst. Analyze this raw data, extract key statistical trends, and explain the relationships clearly."
+480:         elif content_type in ['pdf', 'doc', 'docx']:
+481:             persona = "You are an expert Document Analyst and Legal/Business Consultant. Read this document, extract the core arguments, pinpoint critical clauses, and provide a high-level briefing."
+482:             
+483:         # Determine prompt
+484:         prompt = ""
+485:         if output_type == "audio":
+486:             prompt = f"Write an engaging, conversational podcast script discussing the key points of this document:\n\n{content[:15000]}"
+487:         elif output_type == "slide":
+488:             prompt = f"Create a comprehensive slide deck presentation outline for this document. For each slide, provide a Title and Bullet Points:\n\n{content[:15000]}"
+489:         elif output_type == "video":
+490:             prompt = f"Write a detailed storyboard and script for an educational YouTube video explaining the contents of this document:\n\n{content[:15000]}"
+491:         elif output_type == "mindmap":
+492:             prompt = f"Extract a structured hierarchical mind map from this document. Use clear indentation and bullet points to map out core concepts, subtopics, and relationships:\n\n{content[:15000]}"
+493:         elif output_type == "reports":
+494:             prompt = f"Generate a formal, highly structured business report summarizing this document's findings, including an executive summary, methodology (if applicable), core findings, and recommendations:\n\n{content[:15000]}"
+495:         elif output_type == "flashcards":
+496:             prompt = f"Create 10 study flashcards based on this document. Format them strictly as:\nQ: [Question]\nA: [Answer]\n\n{content[:15000]}"
+497:         elif output_type == "quiz":
+498:             prompt = f"Create a multiple-choice quiz with 5 challenging questions based on this document. Provide 4 options per question and include the correct answers at the end:\n\n{content[:15000]}"
+499:         elif output_type == "infographic":
+500:             prompt = f"Design a text-based blueprint for an infographic based on this document. Propose main section headers, key statistics, bullet points, and suggestions for visual icons/charts:\n\n{content[:15000]}"
+501:         elif output_type == "datatable":
+502:             prompt = f"Extract the key entities, metrics, categories, or factual properties from this document and organize them into a clean, comprehensive Markdown table:\n\n{content[:15000]}"
+503:         else:
+504:             prompt = f"Please provide a {output_type} of the following document content:\n\n{content[:15000]}"
+505:             
+506:         description = generate_with_retry(prompt, persona)
+507:         
+508:         # Append to answers
+509:         try:
+510:             chat_history = json.loads(answers_str) if answers_str else []
+511:         except:
+512:             chat_history = []
+513:             
+514:         # Filter existing studio of the same type to avoid bloat (optional, but good for keeping history clean)
+515:         chat_history = [msg for msg in chat_history if not (msg.get('role') == 'studio' and msg.get('feature') == output_type)]
+516:         
+517:         chat_history.append({
+518:             "role": "studio",
+519:             "feature": output_type,
+520:             "content": description
+521:         })
+522:         
+523:         c.execute("UPDATE user_history SET answers = %s WHERE id = %s", (json.dumps(chat_history), history_id))
+524:         conn.commit()
+525:         release_db_connection(conn)
+526:         
+527:         return jsonify({
+528:             "success": True, 
+529:             "data": {
+530:                 "id": history_id,
+531:                 "description": description,
+532:                 "feature": output_type
+533:             }
+534:         })
+535: 
+536:     # === STANDARD ANALYSIS (New Document) ===
+537:     content = text_input
+538:     content_type = "text"
+539:     file_name = None
+540: 
+541:     MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
+542:     if 'file' in request.files:
+543:         file = request.files['file']
+544:         if file.filename:
+545:             file.seek(0, 2)
+546:             file_size = file.tell()
+547:             file.seek(0)
+548:             if file_size > MAX_FILE_SIZE:
+549:                 return jsonify({"success": False, "message": f"File too large. Maximum allowed size is 20 MB (your file: {file_size // (1024*1024)} MB)."}), 413
+550:             file_name = file.filename
+551:             content_type = file.filename.split('.')[-1].lower()
+552:             
+553:             # Save file temporarily to extract text
+554:             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{content_type}") as tmp:
+555:                 file.save(tmp.name)
+556:                 tmp_path = tmp.name
+557:                 
+558:             try:
+559:                 if content_type == 'pdf':
+560:                     content = extract_text_from_pdf(tmp_path)
+561:                 elif content_type in ['doc', 'docx']:
+562:                     content = extract_text_from_word(tmp_path)
+563:                 elif content_type in ['png', 'jpg', 'jpeg']:
+564:                     content = extract_text_from_image(tmp_path)
+565:                 elif content_type in ['py', 'json', 'txt', 'js', 'html', 'css', 'jsx', 'ts', 'tsx', 'csv', 'md', 'env', 'xml']:
+566:                     content = extract_text_from_code(tmp_path)
+567:                 else:
+568:                     with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+569:                         content = f.read()
+570:             except Exception as e:
+571:                 return jsonify({"success": False, "message": f"File extraction error: {str(e)}"}), 500
+572:             finally:
+573:                 os.unlink(tmp_path)
+574:     # If no file was uploaded, check if the text input is actually a URL
+575:     elif text_input.strip().startswith('http://') or text_input.strip().startswith('https://'):
+576:         url = text_input.strip()
+577:         try:
+578:             # Mask as a standard browser to avoid basic blocks
+579:             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+580:             response = requests.get(url, headers=headers, timeout=15)
+581:             response.raise_for_status()
+582:             
+583:             soup = BeautifulSoup(response.text, 'html.parser')
+584:             # Extract text carefully, dropping scripts and styles
+585:             for script in soup(["script", "style", "nav", "footer", "header"]):
+586:                 script.extract()
+587:             content = soup.get_text(separator='\n', strip=True)
+588:             content_type = "url"
+589:             file_name = url
+590:         except Exception as e:
+591:             return jsonify({"success": False, "message": f"URL scraping failed: {str(e)}"}), 500
+592:     # Web Search Agent Feature
+593:     elif text_input.strip().startswith('/search '):
+594:         query = text_input.replace('/search ', '').strip()
+595:         try:
+596:             from duckduckgo_search import DDGS
+597:             with DDGS() as ddgs:
+598:                 results = list(ddgs.text(query, max_results=5))
+599:                 
+600:             if not results:
+601:                 content = f"No search results found for query: {query}"
+602:             else:
+603:                 content = f"Web Search Context for query '{query}':\n\n"
+604:                 for i, r in enumerate(results):
+605:                     content += f"[{i+1}] {r.get('title')}\nSnippet: {r.get('body')}\nURL: {r.get('href')}\n\n"
+606:             content_type = "web_search"
+607:             file_name = f"Search: {query[:30]}..."
+608:         except Exception as e:
+609:             return jsonify({"success": False, "message": f"Web Search failed. Please install 'duckduckgo_search' if missing. Error: {str(e)}"}), 500
+610:             
+611:     if not content:
+612:         return jsonify({"success": False, "message": "No content provided to analyze"}), 400
+613: 
+614:     # Determine personalized AI persona based on document type
+615:     persona = "You are OmniDoc AI, an expert document assistant. Provide the most critical highlights."
+616:     if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+617:         persona = "You are a Senior Principal Software Engineer. Analyze the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+618:     elif content_type == 'csv':
+619:         persona = "You are an Elite Data Scientist and Data Analyst. Analyze this raw data, extract key statistical trends, and explain the relationships clearly."
+620:     elif content_type in ['pdf', 'doc', 'docx']:
+621:         persona = "You are an expert Document Analyst and Legal/Business Consultant. Read this document, extract the core arguments, pinpoint critical clauses, and provide a high-level briefing."
+622: 
+623:     # Determine custom advanced prompt based on output_type
+624:     if output_type == "audio":
+625:         prompt = f"Write an engaging, conversational podcast script discussing the key points of this document:\n\n{content[:15000]}"
+626:     elif output_type == "slide":
+627:         prompt = f"Create a comprehensive slide deck presentation outline for this document. For each slide, provide a Title and Bullet Points:\n\n{content[:15000]}"
+628:     elif output_type == "video":
+629:         prompt = f"Write a detailed storyboard and script for an educational YouTube video explaining the contents of this document:\n\n{content[:15000]}"
+630:     elif output_type == "mindmap":
+631:         prompt = f"Extract a structured hierarchical mind map from this document. Use clear indentation and bullet points to map out core concepts, subtopics, and relationships:\n\n{content[:15000]}"
+632:     elif output_type == "reports":
+633:         prompt = f"Generate a formal, highly structured business report summarizing this document's findings, including an executive summary, methodology (if applicable), core findings, and recommendations:\n\n{content[:15000]}"
+634:     elif output_type == "flashcards":
+635:         prompt = f"Create 10 study flashcards based on this document. Format them strictly as:\nQ: [Question]\nA: [Answer]\n\n{content[:15000]}"
+636:     elif output_type == "quiz":
+637:         prompt = f"Create a multiple-choice quiz with 5 challenging questions based on this document. Provide 4 options per question and include the correct answers at the end:\n\n{content[:15000]}"
+638:     elif output_type == "infographic":
+639:         prompt = f"Design a text-based blueprint for an infographic based on this document. Propose main section headers, key statistics, bullet points, and suggestions for visual icons/charts:\n\n{content[:15000]}"
+640:     elif output_type == "datatable":
+641:         prompt = f"Extract the key entities, metrics, categories, or factual properties from this document and organize them into a clean, comprehensive Markdown table:\n\n{content[:15000]}"
+642:     else:
+643:         prompt = f"Please provide a {output_type} of the following document content:\n\n{content[:15000]}"
+644:     questions_prompt = f"Based on this content, suggest 3 highly analytical follow-up questions I should ask about it:\n{content[:10000]}"
+645:     
+646:     # Run API calls concurrently to slice processing time in half
+647:     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+648:         future_desc = executor.submit(generate_with_retry, prompt, persona)
+649:         future_ques = executor.submit(generate_with_retry, questions_prompt, persona)
+650:         description = future_desc.result()
+651:         questions = future_ques.result()
+652:     
+653:     answers_str = None
+654:     if output_type not in ["Summary", "Detailed", "Bullet Points", "Deep Dive"]:
+655:         answers_str = json.dumps([{"role": "studio", "feature": output_type, "content": description}])
+656: 
+657:     # (We already have an active conn from the top of the function)
+658:     c.execute("""INSERT INTO user_history (user_id, content_type, content, description, questions, answers, file_name, folder_name) 
+659:                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
+660:     entry_id = c.fetchone()['id']
+661:     
+662:     # Store document embeddings directly into Qdrant for persistent RAG querying!
+663:     client_q = get_q_client()
+664:     if client_q and content:
+665:         import uuid
+666:         chunks = chunk_text(content, chunk_size=1500, overlap=300)
+667:         if chunks:
+668:              emb_model = get_embedder()
+669:              embeddings = emb_model.encode(chunks, convert_to_numpy=True)
+670:              points = []
+671:              for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+672:                  points.append(
+673:                      PointStruct(
+674:                          id=str(uuid.uuid4()),
+675:                          vector=emb.tolist(),
+676:                          payload={
+677:                              "history_id": entry_id, 
+678:                              "text": chunk, 
+679:                              "chunk_index": i,
+680:                              "file_name": file_name
+681:                          }
+682:                      )
+683:                  )
+684:              client_q.upsert(collection_name="omnidoc_chunks", points=points)
+685:              
+686:     # Increment analysis count
+687:     c.execute("UPDATE users SET analysis_count = analysis_count + 1 WHERE id = %s", (user_id,))
+688:     conn.commit()
+689:     
+690:     # Fetch updated user explicitly over to send to client
+691:     c.execute("SELECT analysis_count FROM users WHERE id = %s", (user_id,))
+692:     updated_count = c.fetchone()['analysis_count']
+693:     
+694:     release_db_connection(conn)
+695: 
+696:     return jsonify({
+697:         "success": True, 
+698:         "data": {
+699:             "id": entry_id,
+700:             "description": description,
+701:             "questions": questions.split('\n'),
+702:             "fileName": file_name,
+703:             "analysis_count": updated_count,
+704:             "content": content
+705:         }
+706:     })
+707: 
+708: @app.route('/api/chat', methods=['POST'])
+709: def chat():
+710:     data = request.json
+711:     history_id = data.get('history_id')
+712:     history_ids = data.get('history_ids')
+713:     question = data.get('question')
+714:     
+715:     if not (history_id or history_ids) or not question:
+716:         return jsonify({"success": False, "message": "Missing history_id(s) or question"}), 400
+717:         
+718:     if not history_ids:
+719:         history_ids = [history_id]
+720: 
+721:     conn = get_db_connection()
+722:     c = conn.cursor(cursor_factory=RealDictCursor)
+723:     
+724:     placeholders = ','.join('%s' for _ in history_ids)
+725:     c.execute(f"SELECT id, content, answers, content_type FROM user_history WHERE id IN ({placeholders})", tuple(history_ids))
+726:     rows = c.fetchall()
+727:     
+728:     if not rows:
+729:         release_db_connection(conn)
+730:         return jsonify({"success": False, "message": "History not found"}), 404
+731:         
+732:     combined_content = "\n\n--- NEXT DOCUMENT ---\n\n".join([r['content'] for r in rows])
+733:     content_type = rows[0]['content_type'] if rows[0]['content_type'] else 'txt'  # Use the first one's type as default persona
+734:     
+735:     # 3. Retrieve relevant chunks using Qdrant persistent RAG logic
+736:     rag_context = retrieve_relevant_chunks(question, history_ids, combined_content, top_k=5)[:25000]
+737:     
+738:     answers_str = rows[0]['answers']  # Store answers in the first document for simplicity
+739: 
+740:     if answers_str:
+741:         try:
+742:             raw_history = json.loads(answers_str)
+743:             # Filter out studio entries - they are not valid OpenAI message roles
+744:             chat_history = [m for m in raw_history if m.get('role') in ('user', 'ai', 'assistant')]
+745:         except json.JSONDecodeError:
+746:             chat_history = []
+747:     else:
+748:         chat_history = []
+749: 
+750:     # Determine personalized AI persona based on document type
+751:     persona = "You are OmniDoc AI, an expert document assistant. You are answering a user's questions based on the document."
+752:     if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
+753:         persona = "You are a Senior Principal Software Engineer. Answer the user's questions about the provided code with extreme technical precision, highlighting design patterns, potential bugs, and architectural decisions."
+754:     elif content_type == 'csv':
+755:         persona = "You are an Elite Data Scientist and Data Analyst. Answer the user's questions about the raw data, extract key statistical trends, and explain the relationships clearly."
+756:     elif content_type in ['pdf', 'doc', 'docx']:
+757:         persona = "You are an expert Document Analyst and Legal/Business Consultant. Answer the user's questions about the document, extract the core arguments, pinpoint critical clauses, and provide high-level briefings."
+758:         
+759:     # Construct complete message history with document context
+760:     messages = [
+761:         {"role": "system", "content": f"{persona}\n\nDOCUMENT CONTEXT (retrieved snippets):\n{rag_context}"}
+762:     ]
+763:     
+764:     # Append previous chat turns (only user/ai/assistant roles)
+765:     for msg in chat_history:
+766:         role = 'assistant' if msg.get('role') in ('ai', 'assistant') else 'user'
+767:         content = msg.get('content', '')
+768:         if content:
+769:             messages.append({"role": role, "content": content})
+770:         
+771:     messages.append({"role": "user", "content": question})
+772:     release_db_connection(conn)
+773:     
+774:     # Will save the chat stream to the first history_id passed
+775:     return Response(generate_chat_stream(messages, history_ids[0], question, chat_history), mimetype='text/event-stream')
+776: 
+777: import uuid
+778: 
+779: @app.route('/api/share/<int:history_id>', methods=['POST'])
+780: def share_history(history_id):
+781:     conn = get_db_connection()
+782:     c = conn.cursor(cursor_factory=RealDictCursor)
+783:     c.execute("SELECT shared_id FROM user_history WHERE id = %s", (history_id,))
+784:     row = c.fetchone()
+785:     
+786:     if not row:
+787:         release_db_connection(conn)
+788:         return jsonify({"success": False, "message": "History not found"}), 404
+789:         
+790:     shared_id = row['shared_id']
+791:     if not shared_id:
+792:         shared_id = str(uuid.uuid4())
+793:         c.execute("UPDATE user_history SET shared_id = %s WHERE id = %s", (shared_id, history_id))
+794:         conn.commit()
+795:         
+796:     release_db_connection(conn)
+797:     return jsonify({"success": True, "shared_id": shared_id})
+798: 
+799: @app.route('/api/shared/<shared_id>', methods=['GET'])
+800: def get_shared_history(shared_id):
+801:     conn = get_db_connection()
+802:     c = conn.cursor(cursor_factory=RealDictCursor)
+803:     c.execute("SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = %s", (shared_id,))
+804:     row = c.fetchone()
+805:     release_db_connection(conn)
+806:     
+807:     if not row:
+808:         return jsonify({"success": False, "message": "Shared document not found"}), 404
+809:         
+810:     return jsonify({"success": True, "data": dict(row)})
+811: 
+812: @app.route('/api/admin/users', methods=['GET'])
+813: @require_admin
+814: def admin_users():
+815:     conn = get_db_connection()
+816:     c = conn.cursor(cursor_factory=RealDictCursor)
+817:     c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
+818:     users = [dict(r) for r in c.fetchall()]
+819:     release_db_connection(conn)
+820:     return jsonify({"success": True, "users": users})
+821: 
+822: @app.route('/api/admin/history', methods=['GET'])
+823: @require_admin
+824: def admin_history():
+825:     conn = get_db_connection()
+826:     c = conn.cursor(cursor_factory=RealDictCursor)
+827:     c.execute("SELECT h.id, h.content_type, h.file_name, h.created_at, u.username as user FROM user_history h JOIN users u ON h.user_id = u.id ORDER BY h.created_at DESC LIMIT 100")
+828:     history = [dict(r) for r in c.fetchall()]
+829:     release_db_connection(conn)
+830:     return jsonify({"success": True, "history": history})
+831: 
+832: @app.route('/api/admin/export', methods=['GET'])
+833: @require_admin
+834: def admin_export_csv():
+835:     # In a real app, verify admin role here via token/session
+836:     conn = get_db_connection()
+837:     c = conn.cursor(cursor_factory=RealDictCursor)
+838:     c.execute("SELECT id, username, role, analysis_count, is_premium FROM users ORDER BY id DESC")
+839:     users = c.fetchall()
+840:     release_db_connection(conn)
+841: 
+842:     si = io.StringIO()
+843:     cw = csv.writer(si)
+844:     cw.writerow(['ID', 'Username', 'Role', 'Analysis Count', 'Premium Status'])
+845:     for u in users:
+846:         cw.writerow([u['id'], u['username'], u['role'], u['analysis_count'], 'Yes' if u['is_premium'] else 'No'])
+847: 
+848:     output = si.getvalue()
+849:     return Response(
+850:         output,
+851:         mimetype="text/csv",
+852:         headers={"Content-Disposition": "attachment;filename=omnidoc_users.csv"}
+853:     )
+854: 
+855: # Configure Stripe API Key here (using a placeholder or standard test fallback)
+856: stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+857: 
+858: @app.route('/api/create-checkout-session', methods=['POST'])
+859: def create_checkout_session():
+860:     try:
+861:         data = request.json
+862:         user_id = data.get('user_id')
+863:         
+864:         FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+865:         # If no stripe key is provided, we simulate the success via direct redirect so the app doesn't break
+866:         if not stripe.api_key:
+867:             return jsonify({
+868:                 "success": True, 
+869:                 "url": f"{FRONTEND_URL}/?success=true&user_id={user_id}"
+870:             })
+871: 
+872:         session = stripe.checkout.Session.create(
+873:             payment_method_types=['card'],
+874:             line_items=[{
+875:                 'price_data': {
+876:                     'currency': 'usd',
+877:                     'product_data': {
+878:                         'name': 'OMNIDOC AI Premium',
+879:                         'description': 'Unlimited AI Document Analysis and Vector RAG Search',
+880:                     },
+881:                     'unit_amount': 1500, # $15.00
+882:                 },
+883:                 'quantity': 1,
+884:             }],
+885:             mode='payment',
+886:             success_url=f"{FRONTEND_URL}/?success=true&user_id={user_id}",
+887:             cancel_url=f"{FRONTEND_URL}/?canceled=true",
+888:         )
+889:         return jsonify({"success": True, "url": session.url})
+890:     except Exception as e:
+891:         return jsonify({"success": False, "message": str(e)}), 500
+892: 
+893: @app.route('/api/user/checkout-success', methods=['POST'])
+894: def checkout_success():
+895:     data = request.json
+896:     user_id = data.get('user_id')
+897:     
+898:     # Normally, this is handled by a Secure Stripe Webhook. 
+899:     # For local testing, we update the DB when the Frontend redirects back.
+900:     conn = get_db_connection()
+901:     c = conn.cursor(cursor_factory=RealDictCursor)
+902:     c.execute("UPDATE users SET is_premium = 1 WHERE id = %s", (user_id,))
+903:     conn.commit()
+904:     release_db_connection(conn)
+905:     return jsonify({"success": True})
+906: 
+907: if __name__ == '__main__':
+908:     # Run the Flask app on port 5000
+909:     app.run(host='0.0.0.0', port=5000, debug=True)
+910: 
+911: 
+912: def check_db():
+913:     conn = get_db_connection()
+914:     c = conn.cursor()
+915:     c.execute('''
+916:         CREATE TABLE IF NOT EXISTS users (
+917:             id SERIAL PRIMARY KEY,
+918:             username VARCHAR(255) UNIQUE NOT NULL,
+919:             password_hash VARCHAR(255) NOT NULL,
+920:             role VARCHAR(50) DEFAULT 'user',
+921:             analysis_count INTEGER DEFAULT 0,
+922:             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+923:             is_premium INTEGER DEFAULT 0
+924:         )
+925:     ''')
+926:     c.execute('''
+927:         CREATE TABLE IF NOT EXISTS user_history (
+928:             id SERIAL PRIMARY KEY,
+929:             user_id INTEGER REFERENCES users(id),
+930:             content_type VARCHAR(50),
+931:             content TEXT,
+932:             description TEXT,
+933:             questions TEXT,
+934:             answers TEXT,
+935:             file_name TEXT,
+936:             folder_name TEXT,
+937:             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+938:         )
+939:     ''')
+940:     conn.commit()
+941:     release_db_connection(conn)
+942: 
+943: check_db()

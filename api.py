@@ -688,32 +688,38 @@ def analyze_content():
             release_db_connection(conn_insert)
 
     # Store document embeddings directly into Qdrant for persistent RAG querying!
-    # Moved OUTSIDE the open DB transaction to prevent holding the connection!
-    try:
-        client_q = get_q_client()
-        if client_q and content:
-            import uuid
-            chunks = chunk_text(content, chunk_size=1500, overlap=300)
-            if chunks:
-                 emb_model = get_embedder()
-                 embeddings = emb_model.encode(chunks, convert_to_numpy=True)
-                 points = []
-                 for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                     points.append(
-                         PointStruct(
-                             id=str(uuid.uuid4()),
-                             vector=emb.tolist(),
-                             payload={
-                                 "history_id": entry_id, 
-                                 "text": chunk, 
-                                 "chunk_index": i,
-                                 "file_name": file_name
-                             }
+    # Moved OUTSIDE the request thread to prevent holding the connection and blocking the frontend!
+    def embed_in_background(text_content, hid, fname):
+        try:
+            client_q = get_q_client()
+            if client_q and text_content:
+                import uuid
+                chunks = chunk_text(text_content, chunk_size=1500, overlap=300)
+                if chunks:
+                     emb_model = get_embedder()
+                     embeddings = emb_model.encode(chunks, convert_to_numpy=True)
+                     points = []
+                     for idx, (chunk, emb) in enumerate(zip(chunks, embeddings)):
+                         points.append(
+                             PointStruct(
+                                 id=str(uuid.uuid4()),
+                                 vector=emb.tolist(),
+                                 payload={
+                                     "history_id": hid, 
+                                     "text": chunk, 
+                                     "chunk_index": idx,
+                                     "file_name": fname
+                                 }
+                             )
                          )
-                     )
-                 client_q.upsert(collection_name="omnidoc_chunks", points=points)
-    except Exception as q_err:
-        print(f"Warning: Qdrant embedding failed ({q_err})")
+                     client_q.upsert(collection_name="omnidoc_chunks", points=points)
+        except Exception as q_err:
+            print(f"Warning: Qdrant embedding failed ({q_err})")
+
+    import threading
+    t = threading.Thread(target=embed_in_background, args=(content, entry_id, file_name))
+    t.daemon = True
+    t.start()
 
     return jsonify({
         "success": True, 

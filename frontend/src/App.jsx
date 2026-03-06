@@ -405,6 +405,11 @@ function App() {
   };
 
   const handleAnalyze = async (overrideType = null, featObj = null) => {
+    // Prevent React's SyntheticEvent from being used as the overrideType
+    if (overrideType && typeof overrideType !== 'string') {
+      overrideType = null;
+    }
+
     if (!isAuthenticated) {
       toast.info("Please sign up or login to analyze files");
       setInitialAuthMode('signup');
@@ -807,6 +812,8 @@ function App() {
                     setActiveTab('upload');
                     setMultiSelectMode(false);
                     setSelectedHistoryIds([]);
+                    setIsAnalyzing(false);
+                    setIsAnalyzingStudio(false);
                     if (fileInputRef.current) fileInputRef.current.value = "";
                   }}
                   style={{ border: 'none', boxShadow: 'none' }}

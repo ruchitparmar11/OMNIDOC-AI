@@ -45,7 +45,10 @@ try:
                 API_KEY = line.split("=")[1].strip().strip('"').strip("'")
                 break
 except Exception as e:
-    print(f"Failed to load OpenRouter API key: {e}")
+    # If not found in file, try to grab from the system's environment variables (e.g. Render/Vercel)
+    API_KEY = os.environ.get("OPENROUTER_API_KEY")
+    if not API_KEY:
+        print(f"Failed to load OpenRouter API key from secrets or environment.")
 
 client = None
 if API_KEY:
@@ -456,8 +459,7 @@ def analyze_content():
     if history_id and output_type != "Summary":
         # Studio generation on an EXISTING document! 
         # Skip extraction, reuse the content, and append to the existing DB row
-        conn = get_db_connection()
-        c = conn.cursor(cursor_factory=RealDictCursor)
+        # (We already have an active conn)
         c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = %s AND user_id = %s", (history_id, user_id))
         row = c.fetchone()
         if not row:
@@ -652,11 +654,10 @@ def analyze_content():
     if output_type not in ["Summary", "Detailed", "Bullet Points", "Deep Dive"]:
         answers_str = json.dumps([{"role": "studio", "feature": output_type, "content": description}])
 
-    conn = get_db_connection()
-    c = conn.cursor(cursor_factory=RealDictCursor)
+    # (We already have an active conn from the top of the function)
     c.execute("""INSERT INTO user_history (user_id, content_type, content, description, questions, answers, file_name, folder_name) 
-                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
-    entry_id = c.lastrowid
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
+    entry_id = c.fetchone()['id']
     
     # Store document embeddings directly into Qdrant for persistent RAG querying!
     client_q = get_q_client()

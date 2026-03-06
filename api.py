@@ -391,7 +391,7 @@ def get_user_history(user_id):
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("""SELECT content_type, content, description, questions, answers, created_at, id, file_name, folder_name 
-                 FROM user_history WHERE user_id = ? ORDER BY created_at DESC""", (user_id,))
+                 FROM user_history WHERE user_id = %s ORDER BY created_at DESC""", (user_id,))
     history = [dict(row) for row in c.fetchall()]
     release_db_connection(conn)
     return jsonify({"success": True, "history": history})
@@ -430,7 +430,7 @@ def analyze_content():
 
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT role, analysis_count, is_premium FROM users WHERE id = ?", (user_id,))
+    c.execute("SELECT role, analysis_count, is_premium FROM users WHERE id = %s", (user_id,))
     user = c.fetchone()
     
     if not user:
@@ -458,7 +458,7 @@ def analyze_content():
         # Skip extraction, reuse the content, and append to the existing DB row
         conn = get_db_connection()
         c = conn.cursor(cursor_factory=RealDictCursor)
-        c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = ? AND user_id = ?", (history_id, user_id))
+        c.execute("SELECT content, answers, file_name, content_type FROM user_history WHERE id = %s AND user_id = %s", (history_id, user_id))
         row = c.fetchone()
         if not row:
             release_db_connection(conn)
@@ -655,7 +655,7 @@ def analyze_content():
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     c.execute("""INSERT INTO user_history (user_id, content_type, content, description, questions, answers, file_name, folder_name) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""", (user_id, content_type, content, description, questions, answers_str, file_name, folder_name))
     entry_id = c.lastrowid
     
     # Store document embeddings directly into Qdrant for persistent RAG querying!
@@ -683,11 +683,11 @@ def analyze_content():
              client_q.upsert(collection_name="omnidoc_chunks", points=points)
              
     # Increment analysis count
-    c.execute("UPDATE users SET analysis_count = analysis_count + 1 WHERE id = ?", (user_id,))
+    c.execute("UPDATE users SET analysis_count = analysis_count + 1 WHERE id = %s", (user_id,))
     conn.commit()
     
     # Fetch updated user explicitly over to send to client
-    c.execute("SELECT analysis_count FROM users WHERE id = ?", (user_id,))
+    c.execute("SELECT analysis_count FROM users WHERE id = %s", (user_id,))
     updated_count = c.fetchone()['analysis_count']
     
     release_db_connection(conn)
@@ -720,7 +720,7 @@ def chat():
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
     
-    placeholders = ','.join('?' for _ in history_ids)
+    placeholders = ','.join('%s' for _ in history_ids)
     c.execute(f"SELECT id, content, answers, content_type FROM user_history WHERE id IN ({placeholders})", tuple(history_ids))
     rows = c.fetchall()
     
@@ -779,7 +779,7 @@ import uuid
 def share_history(history_id):
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT shared_id FROM user_history WHERE id = ?", (history_id,))
+    c.execute("SELECT shared_id FROM user_history WHERE id = %s", (history_id,))
     row = c.fetchone()
     
     if not row:
@@ -789,7 +789,7 @@ def share_history(history_id):
     shared_id = row['shared_id']
     if not shared_id:
         shared_id = str(uuid.uuid4())
-        c.execute("UPDATE user_history SET shared_id = ? WHERE id = ?", (shared_id, history_id))
+        c.execute("UPDATE user_history SET shared_id = %s WHERE id = %s", (shared_id, history_id))
         conn.commit()
         
     release_db_connection(conn)
@@ -799,7 +799,7 @@ def share_history(history_id):
 def get_shared_history(shared_id):
     conn = get_db_connection()
     c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = ?", (shared_id,))
+    c.execute("SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = %s", (shared_id,))
     row = c.fetchone()
     release_db_connection(conn)
     

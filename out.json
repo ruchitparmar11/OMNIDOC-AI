@@ -1,0 +1,9 @@
+[
+  "433: c.execute(\"SELECT role, analysis_count, is_premium FROM users WHERE id = ?\", (user_id,))",
+  "461: c.execute(\"SELECT content, answers, file_name, content_type FROM user_history WHERE id = ? AND user_id = ?\", (history_id, user_id))",
+  "686: c.execute(\"UPDATE users SET analysis_count = analysis_count + 1 WHERE id = ?\", (user_id,))",
+  "690: c.execute(\"SELECT analysis_count FROM users WHERE id = ?\", (user_id,))",
+  "782: c.execute(\"SELECT shared_id FROM user_history WHERE id = ?\", (history_id,))",
+  "792: c.execute(\"UPDATE user_history SET shared_id = ? WHERE id = ?\", (shared_id, history_id))",
+  "802: c.execute(\"SELECT file_name, content_type, description, questions, answers, created_at FROM user_history WHERE shared_id = ?\", (shared_id,))"
+]

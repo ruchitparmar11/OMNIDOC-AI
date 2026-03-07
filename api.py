@@ -144,6 +144,22 @@ def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
         if isinstance(history_ids, int):
             history_ids = [history_ids]
             
+        # Check if there are any points for the given history_ids before loading heavy models
+        count_result = client_q.count(
+            collection_name="omnidoc_chunks",
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="history_id",
+                        match=MatchAny(any=history_ids)
+                    )
+                ]
+            ),
+            exact=True
+        )
+        if count_result.count == 0:
+            return default_text[:15000] # No relevant documents found, return fallback
+            
         model = get_embedder()
         question_embedding = model.encode([question], convert_to_numpy=True)[0]
         
@@ -783,10 +799,7 @@ def chat():
         return jsonify({"success": False, "message": "History not found"}), 404
         
     combined_content = "\n\n--- NEXT DOCUMENT ---\n\n".join([r['content'] for r in rows])
-    content_type = rows[0]['content_type'] if rows[0]['content_type'] else 'txt'  # Use the first one's type as default persona
-    
-    # 3. Retrieve relevant chunks using Qdrant persistent RAG logic
-    rag_context = retrieve_relevant_chunks(question, history_ids, combined_content, top_k=5)[:25000]
+    content_type = rows[0]['content_type'] if rows[0]['content_type'] else 'txt'
     
     answers_str = rows[0]['answers']  # Store answers in the first document for simplicity
 
@@ -800,6 +813,8 @@ def chat():
     else:
         chat_history = []
 
+    release_db_connection(conn)
+
     # Determine personalized AI persona based on document type
     persona = "You are OmniDoc AI, an expert document assistant. You are answering a user's questions based on the document."
     if content_type in ['py', 'js', 'jsx', 'ts', 'tsx', 'html', 'css', 'json']:
@@ -808,26 +823,39 @@ def chat():
         persona = "You are an Elite Data Scientist and Data Analyst. Answer the user's questions about the raw data, extract key statistical trends, and explain the relationships clearly."
     elif content_type in ['pdf', 'doc', 'docx']:
         persona = "You are an expert Document Analyst and Legal/Business Consultant. Answer the user's questions about the document, extract the core arguments, pinpoint critical clauses, and provide high-level briefings."
-        
-    # Construct complete message history with document context
-    messages = [
-        {"role": "system", "content": f"{persona}\n\nDOCUMENT CONTEXT (retrieved snippets):\n{rag_context}"}
-    ]
-    
-    # Append previous chat turns (only user/ai/assistant roles)
-    for msg in chat_history:
-        role = 'assistant' if msg.get('role') in ('ai', 'assistant') else 'user'
-        content = msg.get('content', '')
-        if content:
-            messages.append({"role": role, "content": content})
-        
-    messages.append({"role": "user", "content": question})
-    release_db_connection(conn)
-    
+
+    def stream_with_rag():
+        """Do RAG context retrieval + AI streaming all in one generator.
+        This ensures no blocking happens before the HTTP streaming response starts.
+        RAG has a 10s timeout so Render cold-start never freezes the request."""
+        import concurrent.futures as cf
+
+        # Attempt RAG with a hard 10-second timeout so Render cold-start never hangs us
+        rag_context = combined_content[:15000]  # safe default
+        try:
+            with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(retrieve_relevant_chunks, question, history_ids, combined_content, 5)
+                rag_context = future.result(timeout=10)[:25000]
+        except Exception:
+            pass  # timeout or error → use plain text fallback
+
+        # Build message list with the resolved context
+        messages = [
+            {"role": "system", "content": f"{persona}\n\nDOCUMENT CONTEXT (retrieved snippets):\n{rag_context}"}
+        ]
+        for msg in chat_history:
+            role = 'assistant' if msg.get('role') in ('ai', 'assistant') else 'user'
+            content_msg = msg.get('content', '')
+            if content_msg:
+                messages.append({"role": role, "content": content_msg})
+        messages.append({"role": "user", "content": question})
+
+        yield from generate_chat_stream(messages, history_ids[0], question, chat_history)
+
     # Will save the chat stream to the first history_id passed
     # Explicit CORS headers needed because browsers block SSE cross-origin without them
     response = Response(
-        generate_chat_stream(messages, history_ids[0], question, chat_history),
+        stream_with_rag(),
         mimetype='text/event-stream'
     )
     response.headers['Access-Control-Allow-Origin'] = '*'

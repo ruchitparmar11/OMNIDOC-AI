@@ -51,9 +51,9 @@ except Exception as e:
         print(f"Failed to load OpenRouter API key from secrets or environment.")
 
 client = None
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 if API_KEY:
-    http_client = httpx.Client(timeout=60)
-    FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+    http_client = httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0))
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=API_KEY,
@@ -209,33 +209,58 @@ def retrieve_relevant_chunks(question, history_ids, default_text, top_k=5):
         return default_text[:15000]
 
 def generate_chat_stream(messages, history_id, question, chat_history, model="openai/gpt-4o-mini", max_retries=3):
+    """Stream AI response with keepalive pings to prevent Render's 30s idle timeout."""
+    import queue
+    import threading
+
     full_answer = ""
     if not client:
         yield f"data: {json.dumps({'content': 'Warning: AI API not initialized.'})}\n\n"
         yield "data: [DONE]\n\n"
         return
-        
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.3,
-                stream=True
-            )
-            for chunk in response:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_answer += content
-                    yield f"data: {json.dumps({'content': content})}\n\n"
-            break
-        except Exception as e:
-            time.sleep(1)
-            if attempt == max_retries - 1:
-                yield f"data: {json.dumps({'content': f'Error streaming ({e})'})}\n\n"
-                yield "data: [DONE]\n\n"
+
+    output_queue = queue.Queue()
+
+    def run_stream():
+        for attempt in range(max_retries):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.3,
+                    stream=True
+                )
+                for chunk in response:
+                    if chunk.choices[0].delta.content is not None:
+                        output_queue.put(("data", chunk.choices[0].delta.content))
+                output_queue.put(("done", None))
                 return
-                
+            except Exception as e:
+                time.sleep(1)
+                if attempt == max_retries - 1:
+                    output_queue.put(("error", str(e)))
+                    return
+
+    t = threading.Thread(target=run_stream, daemon=True)
+    t.start()
+
+    while True:
+        try:
+            msg_type, content = output_queue.get(timeout=15)  # 15s keepalive interval
+            if msg_type == "data":
+                full_answer += content
+                yield f"data: {json.dumps({'content': content})}\n\n"
+            elif msg_type == "done":
+                break
+            elif msg_type == "error":
+                yield f"data: {json.dumps({'content': f'Error: {content}'})}\n\n"
+                break
+        except queue.Empty:
+            # Send a keepalive SSE comment to prevent Render's idle timeout
+            yield ": keepalive\n\n"
+            if not t.is_alive():
+                break
+
     if full_answer:
         chat_history.append({"role": "user", "content": question})
         chat_history.append({"role": "ai", "content": full_answer})
@@ -249,7 +274,7 @@ def generate_chat_stream(messages, history_id, question, chat_history, model="op
                 release_db_connection(conn_chat)
         except Exception:
             pass
-            
+
     yield "data: [DONE]\n\n"
 
 def hash_password(password):
@@ -800,7 +825,16 @@ def chat():
     release_db_connection(conn)
     
     # Will save the chat stream to the first history_id passed
-    return Response(generate_chat_stream(messages, history_ids[0], question, chat_history), mimetype='text/event-stream')
+    # Explicit CORS headers needed because browsers block SSE cross-origin without them
+    response = Response(
+        generate_chat_stream(messages, history_ids[0], question, chat_history),
+        mimetype='text/event-stream'
+    )
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'  # Disables Nginx/proxy buffering on Render
+    return response
 
 import uuid
 

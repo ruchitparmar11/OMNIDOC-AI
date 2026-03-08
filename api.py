@@ -369,15 +369,47 @@ def require_admin(f):
     return decorated
 
 db_pool = None
+DB_CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", "5"))
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+
+def _create_db_connection(db_url):
+    return psycopg2.connect(
+        db_url,
+        connect_timeout=DB_CONNECT_TIMEOUT,
+        application_name="omnidoc_api",
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5
+    )
 
 def init_db_pool():
     global db_pool
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
         try:
-            db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, db_url)
+            db_pool = psycopg2.pool.ThreadedConnectionPool(
+                DB_POOL_MIN,
+                DB_POOL_MAX,
+                db_url,
+                connect_timeout=DB_CONNECT_TIMEOUT,
+                application_name="omnidoc_api",
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
+            # Warm one pooled connection so first login does not pay full connect latency.
+            warm_conn = db_pool.getconn()
+            try:
+                with warm_conn.cursor() as warm_cursor:
+                    warm_cursor.execute("SELECT 1")
+            finally:
+                db_pool.putconn(warm_conn)
             print("Successfully initialized PostgreSQL connection pool.")
         except Exception as e:
+            db_pool = None
             print(f"Error initializing connection pool: {e}")
 
 init_db_pool()
@@ -385,13 +417,16 @@ init_db_pool()
 def get_db_connection():
     if db_pool:
         try:
-            return db_pool.getconn()
+            conn = db_pool.getconn()
+            if conn and conn.closed:
+                return _create_db_connection(os.environ.get("DATABASE_URL"))
+            return conn
         except Exception as e:
             print(f"Error getting connection from pool: {e}")
     # Fallback to direct connection if pool is exhausted or uninitialized
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
-        return psycopg2.connect(db_url)
+        return _create_db_connection(db_url)
     raise Exception("DATABASE_URL is not set.")
 
 def release_db_connection(conn):
@@ -450,17 +485,29 @@ def register():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
-    
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+
+    if not username or not password:
+        return jsonify({"success": False, "message": "Username and password required"}), 400
+
     conn = get_db_connection()
-    c = conn.cursor(cursor_factory=RealDictCursor)
-    c.execute("SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = %s", (username,))
-    user = c.fetchone()
+    try:
+        c = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            c.execute(
+                "SELECT id, username, role, analysis_count, is_premium, password_hash FROM users WHERE username = %s LIMIT 1",
+                (username,)
+            )
+            user = c.fetchone()
+        finally:
+            c.close()
+    finally:
+        release_db_connection(conn)
+
     if user and not check_password(password, user["password_hash"]):
         user = None
-    release_db_connection(conn)
     
     if user:
         token = make_token(user['id'], user['role'])

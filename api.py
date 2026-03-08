@@ -369,9 +369,11 @@ def require_admin(f):
     return decorated
 
 db_pool = None
+db_pool_initialized = False
 DB_CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", "5"))
 DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "10"))
+DB_POOL_WARMUP = os.environ.get("DB_POOL_WARMUP", "0") == "1"
 
 def _create_db_connection(db_url):
     return psycopg2.connect(
@@ -385,7 +387,10 @@ def _create_db_connection(db_url):
     )
 
 def init_db_pool():
-    global db_pool
+    global db_pool, db_pool_initialized
+    if db_pool_initialized:
+        return
+    db_pool_initialized = True
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
         try:
@@ -400,21 +405,21 @@ def init_db_pool():
                 keepalives_interval=10,
                 keepalives_count=5
             )
-            # Warm one pooled connection so first login does not pay full connect latency.
-            warm_conn = db_pool.getconn()
-            try:
-                with warm_conn.cursor() as warm_cursor:
-                    warm_cursor.execute("SELECT 1")
-            finally:
-                db_pool.putconn(warm_conn)
+            if DB_POOL_WARMUP:
+                # Optional warmup for non-serverless deployments.
+                warm_conn = db_pool.getconn()
+                try:
+                    with warm_conn.cursor() as warm_cursor:
+                        warm_cursor.execute("SELECT 1")
+                finally:
+                    db_pool.putconn(warm_conn)
             print("Successfully initialized PostgreSQL connection pool.")
         except Exception as e:
             db_pool = None
             print(f"Error initializing connection pool: {e}")
 
-init_db_pool()
-
 def get_db_connection():
+    init_db_pool()
     if db_pool:
         try:
             conn = db_pool.getconn()
@@ -441,6 +446,10 @@ def release_db_connection(conn):
             conn.close()
         except Exception:
             pass
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({"success": True, "status": "ok"}), 200
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
@@ -1139,4 +1148,5 @@ def check_db():
     conn.commit()
     release_db_connection(conn)
 
-check_db()
+if os.environ.get("RUN_SCHEMA_CHECK", "0") == "1":
+    check_db()

@@ -1533,6 +1533,11 @@ function AuthScreen({ onLogin, initialMode = 'login' }) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    // Wake backend while user types credentials to reduce first-login latency.
+    axios.get(`${API_BASE}/health`, { timeout: 4000 }).catch(() => { });
+  }, []);
+
   const handleSubmit = async () => {
     if (!username || !password) return toast.warning("Please fill in all fields");
     if (!isLogin && password !== confirmPassword) return toast.error("Passwords do not match");

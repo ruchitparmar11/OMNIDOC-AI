@@ -1097,24 +1097,21 @@ function App() {
                               </div>
                             </div>
 
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                              {/* Description — rendered instantly so the chat is immediately usable */}
                               <div style={{ width: '100%', opacity: 0.9 }}>
-                                <TypewriterText text={documentResults.description} delay={3} />
+                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
+                                  {documentResults.description}
+                                </ReactMarkdown>
                               </div>
 
-                              {documentResults.questions && documentResults.questions.length > 0 && (
-                                <div style={{
-                                  width: '100%',
-                                  marginTop: '20px'
-                                }}>
-                                  <p style={{ color: 'var(--text-muted)', fontWeight: '500', marginBottom: '16px', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <Sparkles size={16} color="var(--accent)" /> Suggested Questions
+                              {/* Suggested Questions — only shown in Deep Dive mode */}
+                              {outputType === 'Deep Dive' && documentResults.questions && documentResults.questions.length > 0 && (
+                                <div style={{ width: '100%', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '20px' }}>
+                                  <p style={{ color: 'var(--text-muted)', fontWeight: '500', marginBottom: '14px', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <Sparkles size={15} color="var(--accent)" /> Ask a follow-up
                                   </p>
-                                  <div className="suggested-questions-list" style={{
-                                    display: 'flex',
-                                    flexWrap: 'wrap',
-                                    gap: '10px'
-                                  }}>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                                     {documentResults.questions.map((q, idx) => {
                                       const cleanQ = q.replace(/^\d+\.\s*/, '').replace(/^-\s*/, '').replace(/\*/g, '').trim();
                                       if (!cleanQ) return null;
@@ -1123,31 +1120,34 @@ function App() {
                                           key={idx}
                                           className="suggested-q-btn"
                                           style={{
-                                            padding: '10px 16px',
+                                            padding: '8px 14px',
                                             textAlign: 'left',
                                             borderRadius: '100px',
-                                            border: '1px solid rgba(255, 255, 255, 0.1)',
-                                            background: 'rgba(255, 255, 255, 0.02)',
+                                            border: '1px solid rgba(108,99,255,0.25)',
+                                            background: 'rgba(108,99,255,0.07)',
                                             transition: 'all 0.2s ease',
                                             color: 'var(--text-main)',
                                             cursor: 'pointer',
-                                            fontSize: '0.9rem',
+                                            fontSize: '0.85rem',
                                             lineHeight: '1.4',
                                             display: 'inline-flex',
                                             alignItems: 'center',
-                                            gap: '8px'
+                                            gap: '6px'
                                           }}
                                           onMouseOver={(e) => {
-                                            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
-                                            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+                                            e.currentTarget.style.background = 'rgba(108,99,255,0.18)';
+                                            e.currentTarget.style.borderColor = 'rgba(108,99,255,0.5)';
                                           }}
                                           onMouseOut={(e) => {
-                                            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.02)';
-                                            e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+                                            e.currentTarget.style.background = 'rgba(108,99,255,0.07)';
+                                            e.currentTarget.style.borderColor = 'rgba(108,99,255,0.25)';
                                           }}
-                                          onClick={() => handleChatSubmit(cleanQ)}
+                                          onClick={() => {
+                                            setActiveTab('deepdive');
+                                            setTimeout(() => handleChatSubmit(cleanQ), 50);
+                                          }}
                                         >
-                                          <MessageSquare size={14} color="var(--primary)" style={{ flexShrink: 0 }} />
+                                          <MessageSquare size={12} color="var(--primary)" style={{ flexShrink: 0 }} />
                                           <span>{cleanQ}</span>
                                         </button>
                                       );
@@ -1155,6 +1155,8 @@ function App() {
                                   </div>
                                 </div>
                               )}
+
+
                             </div>
                           </div>
                         </div>
@@ -1233,7 +1235,7 @@ function App() {
                       />
                       <button
                         className="chat-submitBtn"
-                        onClick={handleChatSubmit}
+                        onClick={() => handleChatSubmit()}
                         disabled={(!documentResults && (!multiSelectMode || selectedHistoryIds.length === 0)) || isSending}
                       >
                         <Send size={16} />

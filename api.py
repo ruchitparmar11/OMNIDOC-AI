@@ -33,8 +33,53 @@ from utils.extract_image import extract_text_from_image
 from utils.extract_code import extract_text_from_code
 
 app = Flask(__name__)
-# Enable CORS for the frontend React application running on port 5173
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+app.config["PROPAGATE_EXCEPTIONS"] = False
+# Enable CORS broadly — allow all origins for all routes
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return Response(status=204)
+
+# Safety-net: guarantee CORS headers on EVERY response (including error responses)
+# Without this, when Flask crashes mid-request, the browser misreports the real error as "CORS blocked"
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.errorhandler(500)
+def internal_error(e):
+    resp = jsonify({"success": False, "message": f"Internal server error: {str(e)}"})
+    resp.status_code = 500
+    return resp
+
+@app.errorhandler(413)
+def request_too_large(e):
+    resp = jsonify({"success": False, "message": "File too large. Maximum allowed size is 20 MB."})
+    resp.status_code = 413
+    return resp
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    resp = jsonify({"success": False, "message": "Method not allowed."})
+    resp.status_code = 405
+    return resp
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    print(f"Unhandled server error: {e}")
+    resp = jsonify({"success": False, "message": str(e)})
+    resp.status_code = 500
+    return resp
 
 # Simple parser for secrets.toml
 API_KEY = None
@@ -612,15 +657,32 @@ def analyze_content():
                     content = extract_text_from_pdf(tmp_path)
                 elif content_type in ['doc', 'docx']:
                     content = extract_text_from_word(tmp_path)
-                elif content_type in ['png', 'jpg', 'jpeg']:
+                elif content_type in ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif']:
                     content = extract_text_from_image(tmp_path)
-                elif content_type in ['py', 'json', 'txt', 'js', 'html', 'css', 'jsx', 'ts', 'tsx', 'csv', 'md', 'env', 'xml']:
+                elif content_type in ['py', 'json', 'txt', 'js', 'html', 'css', 'jsx', 'ts', 'tsx', 'csv', 'md', 'env', 'xml', 'yaml', 'yml', 'toml', 'ini', 'sh', 'bat']:
                     content = extract_text_from_code(tmp_path)
                 else:
-                    with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
+                    # Fallback: try to read as plain text
+                    try:
+                        with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                    except Exception:
+                        return jsonify({"success": False, "message": f"Unsupported file type: .{content_type}"}), 400
+                
+                # If extraction returned empty, try plain text fallback
+                if not content or not content.strip():
+                    try:
+                        with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read().strip()
+                    except Exception:
+                        pass
+                
+                if not content or not content.strip():
+                    return jsonify({"success": False, "message": f"Could not extract any text from this {content_type.upper()} file. The file may be empty, password-protected, or contain only images without OCR support."}), 400
+                    
             except Exception as e:
-                return jsonify({"success": False, "message": f"File extraction error: {str(e)}"}), 500
+                print(f"File extraction error for {content_type}: {e}")
+                return jsonify({"success": False, "message": f"File extraction error ({content_type.upper()}): {str(e)}"}), 500
             finally:
                 os.unlink(tmp_path)
     # If no file was uploaded, check if the text input is actually a URL
@@ -996,7 +1058,7 @@ def checkout_success():
 
 if __name__ == '__main__':
     # Run the Flask app on port 5000
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=os.environ.get("FLASK_DEBUG") == "1")
 
 
 def check_db():

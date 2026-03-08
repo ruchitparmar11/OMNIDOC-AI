@@ -906,13 +906,23 @@ h5 {
 }
 
 @media (max-width: 900px) {
+    .app-wrapper {
+        height: 100dvh !important;
+        min-height: 100dvh;
+    }
+
     .dashboard-layout {
         flex-direction: column !important;
-        overflow-y: auto !important;
+        overflow: hidden !important;
+        height: auto !important;
+        min-height: 0;
+        flex: 1;
     }
 
     .mobile-header-area {
         display: flex;
+        position: sticky;
+        top: 0;
     }
 
     /* Hide desktop headers */
@@ -925,6 +935,7 @@ h5 {
         width: 100% !important;
         border-right: none;
         flex: 1;
+        min-height: 0;
         display: none;
         /* hidden by default on mobile */
     }
@@ -936,6 +947,7 @@ h5 {
         width: 100%;
         padding: 16px;
         flex: 1;
+        min-height: 0;
     }
 
     .resize-handle {

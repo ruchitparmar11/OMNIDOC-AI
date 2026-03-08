@@ -16,6 +16,7 @@ import logoUrl from './assets/logo.png';
 
 const rawApiBase = import.meta.env.VITE_API_BASE || 'http://localhost:5000/api';
 const API_BASE = rawApiBase.endsWith('/api') ? rawApiBase : `${rawApiBase}/api`;
+const MOBILE_BREAKPOINT = 900;
 
 const CodeBlock = ({ node, inline, className, children, ...props }) => {
   const match = /language-(\w+)/.exec(className || '');
@@ -143,6 +144,7 @@ function App() {
   const [isResizingStudio, setIsResizingStudio] = useState(false);
 
   const [mobileTab, setMobileTab] = useState('chat'); // 'history', 'chat', 'studio'
+  const [isMobileViewport, setIsMobileViewport] = useState(() => window.innerWidth <= MOBILE_BREAKPOINT);
 
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -173,6 +175,28 @@ function App() {
       document.body.style.userSelect = 'auto';
     };
   }, [isResizingHistory, isResizingStudio]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setIsMobileViewport(window.innerWidth <= MOBILE_BREAKPOINT);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    // Keep mobile panes expanded so each tab view remains consistent.
+    setHistoryOpen(true);
+    setStudioCollapsed(false);
+  }, [isMobileViewport]);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    if (activeTab === 'upload' || activeTab === 'deepdive') {
+      setMobileTab('chat');
+    }
+  }, [activeTab, isMobileViewport]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -284,6 +308,7 @@ function App() {
 
   const loadHistoryItem = (item) => {
     setActiveTab('deepdive');
+    if (isMobileViewport) setMobileTab('chat');
     setShowDocumentViewer(false);
     setIsLoadingHistory(true);
     setDocumentResults(null);
@@ -463,6 +488,7 @@ function App() {
           }
           setChatHistory([]); // reset chat
           setActiveTab('deepdive');
+          if (isMobileViewport) setMobileTab('chat');
           fetchHistory();
         }
       } else {
@@ -602,7 +628,7 @@ function App() {
   }
 
   return (
-    <div className={`app-wrapper mobile-tab-${mobileTab}`} style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div className={`app-wrapper mobile-tab-${mobileTab}`} style={{ height: '100dvh', display: 'flex', flexDirection: 'column' }}>
 
       {/* Unified Mobile Header & Tabs */}
       <div className="mobile-header-area">
@@ -1144,6 +1170,7 @@ function App() {
                                           }}
                                           onClick={() => {
                                             setActiveTab('deepdive');
+                                            if (isMobileViewport) setMobileTab('chat');
                                             setTimeout(() => handleChatSubmit(cleanQ), 50);
                                           }}
                                         >
